@@ -1,0 +1,66 @@
+# ===========================================
+# Secrets and Credentials
+# ===========================================
+
+# Environment files (contain passwords/tokens)
+.env
+.env.*
+*.env
+!.env.example
+
+# Secrets directory
+secrets/
+
+# ===========================================
+# SSL/TLS Certificates
+# ===========================================
+
+# All private keys
+*.key
+*-key.pem
+
+# Certificate directory (regenerated per deployment)
+config/certs/
+
+# ===========================================
+# Runtime State and Logs
+# ===========================================
+
+# Log files
+*.log
+*.json.1
+*.json.2
+
+# State files
+*.txt.bak
+
+# ===========================================
+# Editor and IDE Files
+# ===========================================
+
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ===========================================
+# OS Generated Files
+# ===========================================
+
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ===========================================
+# Claude Code Session Files
+# ===========================================
+
+.claude/

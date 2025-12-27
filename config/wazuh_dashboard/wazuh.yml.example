@@ -1,0 +1,16 @@
+# Wazuh Dashboard API Configuration
+# Copy this file to wazuh.yml and set your API_PASSWORD
+#
+# IMPORTANT: This file contains credentials. Do NOT commit wazuh.yml to git.
+
+hosts:
+  - 1513629884013:
+      url: "https://wazuh.manager"
+      port: 55000
+      username: wazuh-wui
+      password: "REPLACE_WITH_YOUR_API_PASSWORD"  # Must match API_PASSWORD in .env
+      run_as: false
+
+# Disable update check - not useful for Docker deployments
+# Updates are done by pulling new container images, not in-place upgrades
+wazuh.updates.disabled: true

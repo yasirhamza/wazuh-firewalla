@@ -1,0 +1,183 @@
+# Firewalla-Wazuh SIEM Integration
+# https://github.com/YOUR_USERNAME/firewalla-wazuh
+#
+# Integrates Firewalla MSP API with Wazuh SIEM for unified security monitoring.
+#
+# Quick Start:
+#   1. cp .env.example .env && nano .env  # Set your credentials
+#   2. docker compose -f generate-certs.yml run --rm generator  # Generate SSL certs
+#   3. docker compose up -d
+
+services:
+  wazuh.manager:
+    image: wazuh/wazuh-manager:4.14.1
+    hostname: wazuh.manager
+    restart: always
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 655360
+        hard: 655360
+    ports:
+      - "1514:1514"
+      - "1515:1515"
+      - "514:514/udp"
+      - "55000:55000"
+    environment:
+      - INDEXER_URL=https://wazuh.indexer:9200
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=${INDEXER_PASSWORD}
+      - FILEBEAT_SSL_VERIFICATION_MODE=full
+      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+      - SSL_KEY=/etc/ssl/filebeat.key
+      - API_USERNAME=wazuh-wui
+      - API_PASSWORD=${API_PASSWORD}
+    volumes:
+      - wazuh_api_configuration:/var/ossec/api/configuration
+      - wazuh_etc:/var/ossec/etc
+      - wazuh_logs:/var/ossec/logs
+      - wazuh_queue:/var/ossec/queue
+      - wazuh_var_multigroups:/var/ossec/var/multigroups
+      - wazuh_integrations:/var/ossec/integrations
+      - wazuh_active_response:/var/ossec/active-response/bin
+      - wazuh_agentless:/var/ossec/agentless
+      - wazuh_wodles:/var/ossec/wodles
+      - filebeat_etc:/etc/filebeat
+      - filebeat_var:/var/lib/filebeat
+      # SSL certificates
+      - ./config/certs/root-ca-manager.pem:/etc/ssl/root-ca.pem
+      - ./config/certs/wazuh.manager.pem:/etc/ssl/filebeat.pem
+      - ./config/certs/wazuh.manager-key.pem:/etc/ssl/filebeat.key
+      # Wazuh manager config
+      - ./config/wazuh_manager/ossec.conf:/wazuh-config-mount/etc/ossec.conf
+      # MSP poller logs (read-only)
+      - msp_logs:/var/ossec/logs/msp:ro
+      - sidecar_status:/var/ossec/logs/sidecar-status:ro
+      # Custom Firewalla rules and decoders
+      - ./config/wazuh_manager/decoders/firewalla_decoders.xml:/var/ossec/etc/decoders/firewalla_decoders.xml:ro
+      - ./config/wazuh_manager/rules/firewalla_rules.xml:/var/ossec/etc/rules/firewalla_rules.xml:ro
+      # Threat intelligence CDB lists
+      - threat_intel_lists:/var/ossec/etc/lists/threat-intel
+    healthcheck:
+      test: ["CMD-SHELL", "/var/ossec/bin/wazuh-control status | grep -q 'wazuh-analysisd is running'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  wazuh.indexer:
+    image: wazuh/wazuh-indexer:4.14.1
+    hostname: wazuh.indexer
+    restart: always
+    stop_grace_period: 60s
+    ports:
+      - "9200:9200"
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - wazuh-indexer-data:/var/lib/wazuh-indexer
+      - ./config/certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/certs/wazuh.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/wazuh.indexer.key
+      - ./config/certs/wazuh.indexer.pem:/usr/share/wazuh-indexer/config/certs/wazuh.indexer.pem
+      - ./config/certs/admin.pem:/usr/share/wazuh-indexer/config/certs/admin.pem
+      - ./config/certs/admin-key.pem:/usr/share/wazuh-indexer/config/certs/admin-key.pem
+      - ./config/wazuh_indexer/wazuh.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+
+  wazuh.dashboard:
+    image: wazuh/wazuh-dashboard:4.14.1
+    hostname: wazuh.dashboard
+    restart: always
+    ports:
+      - "443:5601"
+    environment:
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=${INDEXER_PASSWORD}
+      - WAZUH_API_URL=https://wazuh.manager
+      - DASHBOARD_USERNAME=kibanaserver
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-kibanaserver}
+      - API_USERNAME=wazuh-wui
+      - API_PASSWORD=${API_PASSWORD}
+    volumes:
+      - ./config/certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem
+      - ./config/certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem
+      - ./config/certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem
+      - ./config/wazuh_dashboard/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml
+      - ./config/wazuh_dashboard/wazuh.yml:/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
+      - wazuh-dashboard-config:/usr/share/wazuh-dashboard/data/wazuh/config
+      - wazuh-dashboard-custom:/usr/share/wazuh-dashboard/plugins/wazuh/public/assets/custom
+    depends_on:
+      - wazuh.indexer
+    links:
+      - wazuh.indexer:wazuh.indexer
+      - wazuh.manager:wazuh.manager
+
+  # ============================================
+  # Firewalla MSP Integration Sidecars
+  # ============================================
+
+  msp-poller:
+    build: ./msp-poller
+    hostname: msp-poller
+    restart: always
+    environment:
+      - MSP_DOMAIN=${MSP_DOMAIN}
+      - MSP_TOKEN=${MSP_TOKEN}
+      - POLL_INTERVAL_ALARMS=300
+      - POLL_INTERVAL_FLOWS=900
+      - POLL_INTERVAL_DEVICES=86400
+      - LOG_DIR=/logs
+      - STATE_DIR=/state
+      - STATUS_DIR=/status
+    volumes:
+      - msp_logs:/logs
+      - msp_state:/state
+      - sidecar_status:/status
+    depends_on:
+      wazuh.manager:
+        condition: service_healthy
+
+  threat-intel:
+    build: ./threat-intel
+    hostname: threat-intel
+    restart: always
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    environment:
+      - UPDATE_INTERVAL=86400
+      - CDB_DIR=/lists
+      - STATUS_DIR=/status
+    volumes:
+      - threat_intel_lists:/lists
+      - sidecar_status:/status
+
+volumes:
+  wazuh_api_configuration:
+  wazuh_etc:
+  wazuh_logs:
+  wazuh_queue:
+  wazuh_var_multigroups:
+  wazuh_integrations:
+  wazuh_active_response:
+  wazuh_agentless:
+  wazuh_wodles:
+  filebeat_etc:
+  filebeat_var:
+  wazuh-indexer-data:
+  wazuh-dashboard-config:
+  wazuh-dashboard-custom:
+  msp_logs:
+  msp_state:
+  threat_intel_lists:
+  sidecar_status:
