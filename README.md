@@ -14,7 +14,7 @@ Integrate your [Firewalla](https://firewalla.com) network security device with [
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/firewalla-wazuh.git
+git clone https://github.com/yasirhamza/firewalla-wazuh.git
 cd firewalla-wazuh
 
 # Configure credentials

@@ -22,7 +22,7 @@ Complete installation and configuration guide for the Firewalla-Wazuh SIEM integ
 ### Step 1: Clone Repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/firewalla-wazuh.git
+git clone https://github.com/yasirhamza/firewalla-wazuh.git
 cd firewalla-wazuh
 ```
 
