@@ -53,20 +53,47 @@ class FirewallaMSPClient:
         self.session = requests.Session()
         self.session.headers.update(self.headers)
 
-    def get_alarms(self, since_ts: int = None) -> list:
-        """Fetch alarms from MSP API"""
+    def get_alarms(self, since_ts: int = None, max_pages: int = 50) -> list:
+        """Fetch alarms from MSP API with pagination support"""
         url = f"{self.base_url}/v2/alarms"
-        params = {}
-        if since_ts:
-            params["ts"] = since_ts
+        all_alarms = []
+        cursor = None
+        page = 0
 
-        try:
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            logger.error(f"Failed to fetch alarms: {e}")
-            return []
+        while page < max_pages:
+            params = {"limit": 200}
+            if since_ts:
+                params["ts"] = since_ts
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                response = self.session.get(url, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+
+                # Handle paginated response
+                if isinstance(data, dict):
+                    alarms = data.get("results", [])
+                    cursor = data.get("next_cursor")
+                    all_alarms.extend(alarms)
+
+                    if not cursor or not alarms:
+                        break
+                    page += 1
+                    logger.debug(f"Fetched page {page}, got {len(alarms)} alarms, total: {len(all_alarms)}")
+                else:
+                    # Legacy list response
+                    all_alarms.extend(data if isinstance(data, list) else [])
+                    break
+
+            except requests.RequestException as e:
+                logger.error(f"Failed to fetch alarms (page {page}): {e}")
+                break
+
+        if page > 0:
+            logger.info(f"Fetched {page + 1} pages, total {len(all_alarms)} alarms")
+        return all_alarms
 
     def get_devices(self) -> list:
         """Fetch all devices from MSP API"""
@@ -92,20 +119,47 @@ class FirewallaMSPClient:
             logger.error(f"Failed to fetch boxes: {e}")
             return []
 
-    def get_flows(self, since_ts: float = None, limit: int = 500) -> list:
-        """Fetch network flows from MSP API"""
+    def get_flows(self, since_ts: float = None, max_pages: int = 20) -> list:
+        """Fetch network flows from MSP API with pagination support"""
         url = f"{self.base_url}/v2/flows"
-        params = {"limit": limit}
-        if since_ts:
-            params["ts"] = since_ts
+        all_flows = []
+        cursor = None
+        page = 0
 
-        try:
-            response = self.session.get(url, params=params, timeout=60)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            logger.error(f"Failed to fetch flows: {e}")
-            return []
+        while page < max_pages:
+            params = {"limit": 500}
+            if since_ts:
+                params["ts"] = since_ts
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                response = self.session.get(url, params=params, timeout=60)
+                response.raise_for_status()
+                data = response.json()
+
+                # Handle paginated response
+                if isinstance(data, dict):
+                    flows = data.get("results", [])
+                    cursor = data.get("next_cursor")
+                    all_flows.extend(flows)
+
+                    if not cursor or not flows:
+                        break
+                    page += 1
+                    logger.debug(f"Fetched flow page {page}, got {len(flows)} flows, total: {len(all_flows)}")
+                else:
+                    # Legacy list response
+                    all_flows.extend(data if isinstance(data, list) else [])
+                    break
+
+            except requests.RequestException as e:
+                logger.error(f"Failed to fetch flows (page {page}): {e}")
+                break
+
+        if page > 0:
+            logger.info(f"Fetched {page + 1} flow pages, total {len(all_flows)} flows")
+        return all_flows
 
 
 class StateManager:
@@ -424,10 +478,11 @@ def wait_for_directories(log_dir: Path, state_dir: Path, timeout: int = 300):
 
 
 def poll_alarms(client: FirewallaMSPClient, state: StateManager, writer: LogWriter, status: StatusReporter = None):
-    """Poll for new alarms"""
+    """Poll for new alarms with full pagination support"""
     last_ts = state.get_last_alarm_ts()
     logger.info(f"Polling alarms since {datetime.fromtimestamp(last_ts)}")
 
+    # get_alarms now handles pagination internally and returns flat list
     alarms = client.get_alarms(since_ts=last_ts)
 
     if not alarms:
@@ -436,45 +491,34 @@ def poll_alarms(client: FirewallaMSPClient, state: StateManager, writer: LogWrit
             status.report_success("alarms", 0)
         return
 
-    # Handle both list and dict responses
-    if isinstance(alarms, dict):
-        # API returns {"results": [...], "next_cursor": ..., "count": ...}
-        alarms = alarms.get("results", alarms.get("alarms", alarms.get("data", [])))
+    logger.info(f"Retrieved {len(alarms)} total alarms from API")
 
-    if not isinstance(alarms, list):
-        logger.warning(f"Unexpected alarms format: {type(alarms)}")
-        alarms = [alarms] if alarms else []
+    # Filter and sort alarms by timestamp (ascending) for proper processing
+    valid_alarms = [a for a in alarms if isinstance(a, dict) and a.get("ts", 0) > last_ts]
+    valid_alarms.sort(key=lambda a: a.get("ts", 0))
 
-    logger.info(f"Retrieved {len(alarms)} alarms")
+    if not valid_alarms:
+        logger.info(f"No new alarms after filtering (all {len(alarms)} were already processed)")
+        if status:
+            status.report_success("alarms", 0)
+        return
+
+    logger.info(f"Found {len(valid_alarms)} new alarms to process")
 
     max_ts = last_ts
-    for alarm in alarms:
-        if not isinstance(alarm, dict):
-            logger.warning(f"Skipping non-dict alarm: {type(alarm)}")
-            continue
+    for alarm in valid_alarms:
+        alarm_ts = alarm.get("ts", 0)
+        writer.write_alarm(alarm)
+        alarm_type = alarm.get("_type", alarm.get("type", "unknown"))
+        alarm_msg = alarm.get("message", "")[:50] if alarm.get("message") else ""
+        logger.debug(f"Wrote alarm: {alarm_type} @ {datetime.fromtimestamp(alarm_ts)} - {alarm_msg}")
+        max_ts = max(max_ts, alarm_ts)
 
-        alarm_ts = alarm.get("ts", alarm.get("timestamp", 0))
-
-        # Debug: log first alarm timestamp info
-        if max_ts == last_ts:
-            logger.info(f"First alarm ts={alarm_ts}, last_ts={last_ts}, type={alarm.get('type')}")
-
-        if alarm_ts > last_ts:
-            writer.write_alarm(alarm)
-            alarm_type = alarm.get("type", "unknown")
-            alarm_msg = alarm.get("message", "")[:50] if alarm.get("message") else ""
-            logger.info(f"Wrote alarm: {alarm_type} - {alarm_msg}")
-            max_ts = max(max_ts, alarm_ts)
-
-    written_count = max_ts - last_ts > 0  # Count how many we wrote
-    alarm_count = sum(1 for a in alarms if isinstance(a, dict) and a.get("ts", 0) > last_ts)
-
-    if max_ts > last_ts:
-        state.set_last_alarm_ts(max_ts)
-        logger.info(f"Updated last alarm timestamp to {datetime.fromtimestamp(max_ts)}")
+    state.set_last_alarm_ts(max_ts)
+    logger.info(f"Processed {len(valid_alarms)} alarms, updated timestamp to {datetime.fromtimestamp(max_ts)}")
 
     if status:
-        status.report_success("alarms", alarm_count)
+        status.report_success("alarms", len(valid_alarms))
 
 
 def poll_devices(client: FirewallaMSPClient, state: StateManager, writer: LogWriter, status: StatusReporter = None):
@@ -536,10 +580,11 @@ def poll_devices(client: FirewallaMSPClient, state: StateManager, writer: LogWri
 
 
 def poll_flows(client: FirewallaMSPClient, state: StateManager, writer: LogWriter, status: StatusReporter = None):
-    """Poll for network flows"""
+    """Poll for network flows with full pagination support"""
     last_ts = state.get_last_flow_ts()
     logger.info(f"Polling flows since {datetime.fromtimestamp(last_ts)}")
 
+    # get_flows now handles pagination internally and returns flat list
     flows = client.get_flows(since_ts=last_ts)
 
     if not flows:
@@ -548,51 +593,46 @@ def poll_flows(client: FirewallaMSPClient, state: StateManager, writer: LogWrite
             status.report_success("flows", 0)
         return
 
-    # Handle API response format
-    if isinstance(flows, dict):
-        flows = flows.get("results", flows.get("flows", flows.get("data", [])))
+    logger.info(f"Retrieved {len(flows)} total flows from API")
 
-    if not isinstance(flows, list):
-        logger.warning(f"Unexpected flows format: {type(flows)}")
+    # Filter for new flows and sort by timestamp (ascending)
+    valid_flows = [f for f in flows if isinstance(f, dict) and f.get("ts", 0) > last_ts]
+    valid_flows.sort(key=lambda f: f.get("ts", 0))
+
+    if not valid_flows:
+        logger.info(f"No new flows after filtering (all {len(flows)} were already processed)")
+        if status:
+            status.report_success("flows", 0)
         return
-
-    logger.info(f"Retrieved {len(flows)} flows")
 
     max_ts = last_ts
     blocked_count = 0
     written_count = 0
 
-    for flow in flows:
-        if not isinstance(flow, dict):
-            continue
-
+    for flow in valid_flows:
         flow_ts = flow.get("ts", 0)
-        if flow_ts > last_ts:
-            # Only log interesting flows: blocked, high bandwidth, or uncategorized
-            is_blocked = flow.get("block", False)
-            bytes_total = flow.get("total", 0)
-            category = flow.get("category", "")
 
-            # Log: blocked flows, high bandwidth (>1MB), or uncategorized
-            should_log = is_blocked or bytes_total > 1000000 or category in ("", "uncategorized")
+        # Only log interesting flows: blocked, high bandwidth, or uncategorized
+        is_blocked = flow.get("block", False)
+        bytes_total = flow.get("total", 0)
+        category = flow.get("category", "")
 
-            if should_log:
-                writer.write_flow(flow)
-                written_count += 1
-                if is_blocked:
-                    blocked_count += 1
+        # Log: blocked flows, high bandwidth (>1MB), or uncategorized
+        should_log = is_blocked or bytes_total > 1000000 or category in ("", "uncategorized")
 
-            max_ts = max(max_ts, flow_ts)
+        if should_log:
+            writer.write_flow(flow)
+            written_count += 1
+            if is_blocked:
+                blocked_count += 1
 
-    if written_count > 0:
-        logger.info(f"Wrote {written_count} flows ({blocked_count} blocked)")
+        max_ts = max(max_ts, flow_ts)
 
-    if max_ts > last_ts:
-        state.set_last_flow_ts(max_ts)
-        logger.info(f"Updated last flow timestamp to {datetime.fromtimestamp(max_ts)}")
+    state.set_last_flow_ts(max_ts)
+    logger.info(f"Processed {len(valid_flows)} flows ({written_count} written, {blocked_count} blocked), updated timestamp to {datetime.fromtimestamp(max_ts)}")
 
     if status:
-        status.report_success("flows", written_count, {"blocked": blocked_count})
+        status.report_success("flows", written_count, {"blocked": blocked_count, "total_new": len(valid_flows)})
 
 
 def main():
