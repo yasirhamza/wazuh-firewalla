@@ -53,17 +53,33 @@ class FirewallaMSPClient:
         self.session = requests.Session()
         self.session.headers.update(self.headers)
 
-    def get_alarms(self, since_ts: int = None, max_pages: int = 50) -> list:
-        """Fetch alarms from MSP API with pagination support"""
+    def get_alarms(self, since_ts: float = None) -> list:
+        """Fetch alarms from MSP API with full pagination support.
+
+        Uses the correct query syntax per Firewalla API docs:
+        - query: "ts:{start}-{end}" for time-based filtering
+        - sortBy: "ts:asc" for chronological order (oldest first)
+        - Paginates until all results are fetched (no max_pages limit)
+        - Rate limiting: 0.5s delay between page fetches
+        """
         url = f"{self.base_url}/v2/alarms"
         all_alarms = []
         cursor = None
         page = 0
 
-        while page < max_pages:
-            params = {"limit": 200}
+        # Build time range query per Firewalla API docs
+        end_ts = int(time.time())
+
+        while True:
+            params = {
+                "limit": 200,
+                "sortBy": "ts:asc"  # Get oldest first for store-and-forward
+            }
+
+            # Use query syntax: "ts:{start}-{end}" per Firewalla docs
             if since_ts:
-                params["ts"] = since_ts
+                params["query"] = f"ts:{int(since_ts)}-{end_ts}"
+
             if cursor:
                 params["cursor"] = cursor
 
@@ -82,6 +98,9 @@ class FirewallaMSPClient:
                         break
                     page += 1
                     logger.debug(f"Fetched page {page}, got {len(alarms)} alarms, total: {len(all_alarms)}")
+
+                    # Rate limiting: small delay between pages to respect API limits
+                    time.sleep(0.5)
                 else:
                     # Legacy list response
                     all_alarms.extend(data if isinstance(data, list) else [])
@@ -119,17 +138,33 @@ class FirewallaMSPClient:
             logger.error(f"Failed to fetch boxes: {e}")
             return []
 
-    def get_flows(self, since_ts: float = None, max_pages: int = 20) -> list:
-        """Fetch network flows from MSP API with pagination support"""
+    def get_flows(self, since_ts: float = None) -> list:
+        """Fetch network flows from MSP API with full pagination support.
+
+        Uses the correct query syntax per Firewalla API docs:
+        - query: "ts:{start}-{end}" for time-based filtering
+        - sortBy: "ts:asc" for chronological order (oldest first)
+        - Paginates until all results are fetched (no max_pages limit)
+        - Rate limiting: 0.5s delay between page fetches
+        """
         url = f"{self.base_url}/v2/flows"
         all_flows = []
         cursor = None
         page = 0
 
-        while page < max_pages:
-            params = {"limit": 500}
+        # Build time range query per Firewalla API docs
+        end_ts = int(time.time())
+
+        while True:
+            params = {
+                "limit": 500,
+                "sortBy": "ts:asc"  # Get oldest first for store-and-forward
+            }
+
+            # Use query syntax: "ts:{start}-{end}" per Firewalla docs
             if since_ts:
-                params["ts"] = since_ts
+                params["query"] = f"ts:{int(since_ts)}-{end_ts}"
+
             if cursor:
                 params["cursor"] = cursor
 
@@ -148,6 +183,9 @@ class FirewallaMSPClient:
                         break
                     page += 1
                     logger.debug(f"Fetched flow page {page}, got {len(flows)} flows, total: {len(all_flows)}")
+
+                    # Rate limiting: small delay between pages to respect API limits
+                    time.sleep(0.5)
                 else:
                     # Legacy list response
                     all_flows.extend(data if isinstance(data, list) else [])
