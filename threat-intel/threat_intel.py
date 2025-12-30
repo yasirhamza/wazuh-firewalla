@@ -139,21 +139,6 @@ class StatusReporter:
         logger.info(f"Rotated status log {self.status_file}")
 
 
-def parse_sslbl_ips(content: str) -> list:
-    """Parse SSLBL IP blacklist CSV"""
-    entries = []
-    for line in content.strip().split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(",")
-        if len(parts) >= 2:
-            ip = parts[1].strip()
-            if ip and not ip.startswith("DstIP"):
-                entries.append((ip, "sslbl-c2"))
-    return entries
-
-
 def parse_feodo_ips(content: str) -> list:
     """Parse Feodo Tracker IP blocklist CSV"""
     entries = []
