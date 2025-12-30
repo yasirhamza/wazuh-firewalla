@@ -218,7 +218,7 @@ class StateManager:
         # Default: 7 days ago for initial backfill (in seconds)
         return (datetime.now() - timedelta(days=7)).timestamp()
 
-    def set_last_alarm_ts(self, ts: int):
+    def set_last_alarm_ts(self, ts: float):
         """Save timestamp of last processed alarm"""
         state_file = self.state_dir / "last_alarm_ts.txt"
         state_file.write_text(str(ts))
