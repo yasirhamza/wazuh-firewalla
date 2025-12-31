@@ -194,12 +194,6 @@ class TestSidecarStatus:
 class TestOpenSearchIntegration:
     """Test OpenSearch indexer connectivity and data"""
 
-    @pytest.fixture(autouse=True)
-    def check_credentials(self):
-        """Skip tests if INDEXER_PASSWORD not set"""
-        if not INDEXER_PASSWORD:
-            pytest.skip("INDEXER_PASSWORD environment variable not set")
-
     def test_indexer_health(self):
         """Check OpenSearch cluster health"""
         result = docker_exec_shell(
