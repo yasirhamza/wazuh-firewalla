@@ -22,9 +22,9 @@ WAZUH_INDEXER = "single-node-wazuh.indexer-1"
 MSP_POLLER = "single-node-msp-poller"
 THREAT_INTEL = "single-node-threat-intel"
 
-# Credentials from environment (default matches docker-compose.yml)
+# Credentials from environment (must be set via .env or environment)
 INDEXER_USER = os.environ.get("INDEXER_USER", "admin")
-INDEXER_PASSWORD = os.environ.get("INDEXER_PASSWORD", "55uF3wo466JMScZV")
+INDEXER_PASSWORD = os.environ.get("INDEXER_PASSWORD", "")
 
 
 def docker_exec(container: str, command: list) -> subprocess.CompletedProcess:
@@ -193,6 +193,12 @@ class TestSidecarStatus:
 
 class TestOpenSearchIntegration:
     """Test OpenSearch indexer connectivity and data"""
+
+    @pytest.fixture(autouse=True)
+    def check_credentials(self):
+        """Skip tests if INDEXER_PASSWORD not set"""
+        if not INDEXER_PASSWORD:
+            pytest.skip("INDEXER_PASSWORD environment variable not set")
 
     def test_indexer_health(self):
         """Check OpenSearch cluster health"""
