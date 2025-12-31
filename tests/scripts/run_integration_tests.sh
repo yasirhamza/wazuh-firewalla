@@ -63,10 +63,18 @@ fi
 echo -e "${YELLOW}Installing test dependencies...${NC}"
 "$VENV_DIR/bin/pip" install -q pytest requests
 
-# Load environment variables
-if [ -f "$PROJECT_ROOT/.env" ]; then
-    echo -e "${YELLOW}Loading environment from .env...${NC}"
+# Load environment variables from deployment .env
+DEPLOY_ENV="/opt/wazuh-docker/single-node/.env"
+if [ -f "$DEPLOY_ENV" ]; then
+    echo -e "${YELLOW}Loading credentials from deployment .env...${NC}"
+    export INDEXER_PASSWORD=$(grep -E "^INDEXER_PASSWORD=" "$DEPLOY_ENV" | cut -d= -f2)
+elif [ -f "$PROJECT_ROOT/.env" ]; then
+    echo -e "${YELLOW}Loading environment from project .env...${NC}"
     export $(grep -v '^#' "$PROJECT_ROOT/.env" | xargs)
+fi
+
+if [ -z "$INDEXER_PASSWORD" ]; then
+    echo -e "${RED}Warning: INDEXER_PASSWORD not set. OpenSearch tests may fail.${NC}"
 fi
 
 # Run the tests
