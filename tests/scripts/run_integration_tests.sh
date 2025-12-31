@@ -64,9 +64,12 @@ echo -e "${YELLOW}Installing test dependencies...${NC}"
 "$VENV_DIR/bin/pip" install -q pytest requests
 
 # Load environment variables from deployment .env
-DEPLOY_ENV="/opt/wazuh-docker/single-node/.env"
+# WAZUH_DEPLOY_DIR can be set to override the default deployment location
+DEPLOY_DIR="${WAZUH_DEPLOY_DIR:-/opt/wazuh-docker/single-node}"
+DEPLOY_ENV="$DEPLOY_DIR/.env"
+
 if [ -f "$DEPLOY_ENV" ]; then
-    echo -e "${YELLOW}Loading credentials from deployment .env...${NC}"
+    echo -e "${YELLOW}Loading credentials from $DEPLOY_ENV...${NC}"
     export INDEXER_PASSWORD=$(grep -E "^INDEXER_PASSWORD=" "$DEPLOY_ENV" | cut -d= -f2)
 elif [ -f "$PROJECT_ROOT/.env" ]; then
     echo -e "${YELLOW}Loading environment from project .env...${NC}"
