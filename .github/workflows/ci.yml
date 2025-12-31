@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint & Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 yamllint
+
+      - name: Lint Python code
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
+
+      - name: Validate YAML files
+        run: |
+          yamllint -d relaxed docker-compose.yml generate-certs.yml
+
+      - name: Validate Docker Compose
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          rm .env
+
+  docker-build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build msp-poller image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./msp-poller
+          push: false
+          tags: msp-poller:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build threat-intel image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./threat-intel
+          push: false
+          tags: threat-intel:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
