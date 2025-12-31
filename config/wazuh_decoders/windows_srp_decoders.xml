@@ -1,0 +1,16 @@
+<!--
+  Windows Software Restriction Policy (SRP) Log Decoder
+  Log location: C:\ParentalControl\Logs\*.log
+
+  Format: <process> (PID = <pid>) identified <path> as <decision> using <rule_type>, Guid = {<guid>}
+-->
+
+<decoder name="windows-srp">
+  <prematch>PID = \d+\p identified </prematch>
+</decoder>
+
+<decoder name="windows-srp-fields">
+  <parent>windows-srp</parent>
+  <regex>^(\S+) \pPID = (\d+)\p identified (\.*) as (\S+) using (\.*), Guid = </regex>
+  <order>srp.parent_process, srp.parent_pid, srp.target_path, srp.decision, srp.rule_type</order>
+</decoder>
