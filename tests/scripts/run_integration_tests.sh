@@ -50,13 +50,18 @@ if [ $MISSING -eq 1 ]; then
     exit 1
 fi
 
-# Install test dependencies if needed
+# Setup virtual environment and install dependencies
 echo ""
-echo -e "${YELLOW}Checking test dependencies...${NC}"
-pip3 install -q pytest requests 2>/dev/null || {
-    echo -e "${YELLOW}Installing pytest and requests...${NC}"
-    pip3 install pytest requests
-}
+echo -e "${YELLOW}Setting up test environment...${NC}"
+VENV_DIR="$PROJECT_ROOT/tests/.venv"
+
+if [ ! -d "$VENV_DIR" ]; then
+    echo -e "${YELLOW}Creating virtual environment...${NC}"
+    python3 -m venv "$VENV_DIR"
+fi
+
+echo -e "${YELLOW}Installing test dependencies...${NC}"
+"$VENV_DIR/bin/pip" install -q pytest requests
 
 # Load environment variables
 if [ -f "$PROJECT_ROOT/.env" ]; then
@@ -70,7 +75,7 @@ echo -e "${YELLOW}Running integration tests...${NC}"
 echo ""
 
 cd "$PROJECT_ROOT/tests"
-python3 -m pytest integration/ -v --tb=short "$@"
+"$VENV_DIR/bin/python" -m pytest integration/ -v --tb=short "$@"
 
 TEST_RESULT=$?
 
