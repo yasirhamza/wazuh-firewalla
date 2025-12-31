@@ -1,0 +1,199 @@
+<!--
+  Windows Software Restriction Policy (SRP) Rules
+  Rule IDs: 100600-100699
+
+  Sources:
+  1. Windows Application Event Log (Provider: SoftwareRestrictionPolicies, Event IDs: 865-868)
+  2. SRP Log File (C:\ParentalControl\Logs\*.log) - contains both allowed and blocked events
+-->
+
+<group name="windows,srp,policy,">
+
+  <!-- ========== FILE-BASED SRP RULES (from decoder) ========== -->
+
+  <!-- Base rule for file-based SRP events -->
+  <rule id="100650" level="0">
+    <decoded_as>windows-srp</decoded_as>
+    <description>Windows SRP log file event</description>
+  </rule>
+
+  <!-- SRP Allowed (Unrestricted) - informational -->
+  <rule id="100651" level="3">
+    <if_sid>100650</if_sid>
+    <field name="srp.decision">^Unrestricted$</field>
+    <description>SRP ALLOWED: $(srp.target_path)</description>
+    <group>srp_allowed,</group>
+  </rule>
+
+  <!-- SRP Blocked (Disallowed) -->
+  <rule id="100652" level="10">
+    <if_sid>100650</if_sid>
+    <field name="srp.decision">^Disallowed$</field>
+    <description>SRP BLOCKED: $(srp.target_path)</description>
+    <group>srp_blocked,</group>
+    <mitre>
+      <id>T1204</id>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
+  <!-- Blocked in user profile - higher severity -->
+  <rule id="100653" level="12">
+    <if_sid>100652</if_sid>
+    <field name="srp.target_path">\\Users\\|\\AppData\\</field>
+    <description>SRP BLOCKED in user profile: $(srp.target_path)</description>
+    <group>srp_blocked,suspicious,</group>
+    <mitre>
+      <id>T1204.002</id>
+    </mitre>
+  </rule>
+
+  <!-- Blocked PowerShell script -->
+  <rule id="100654" level="11">
+    <if_sid>100652</if_sid>
+    <field name="srp.target_path">\.ps1|\.psm1</field>
+    <description>SRP BLOCKED PowerShell: $(srp.target_path)</description>
+    <group>srp_blocked,powershell,</group>
+    <mitre>
+      <id>T1059.001</id>
+    </mitre>
+  </rule>
+
+  <!-- ========== BASELINE DETECTION RULES ========== -->
+
+  <!-- New executable not in baseline (level 7 = alert worthy) -->
+  <!-- Note: Baseline list uses lowercase paths for matching -->
+  <rule id="100660" level="7">
+    <if_sid>100651</if_sid>
+    <list field="srp.target_path" lookup="not_match_key">etc/lists/srp/srp_baseline</list>
+    <description>NEW EXECUTABLE: $(srp.target_path) not in baseline</description>
+    <group>srp_new_executable,</group>
+    <mitre>
+      <id>T1204</id>
+    </mitre>
+  </rule>
+
+  <!-- New executable in user profile - higher severity -->
+  <rule id="100661" level="10">
+    <if_sid>100660</if_sid>
+    <field name="srp.target_path">\\Users\\|\\AppData\\</field>
+    <description>NEW EXECUTABLE in user profile: $(srp.target_path)</description>
+    <group>srp_new_executable,suspicious,</group>
+    <mitre>
+      <id>T1204.002</id>
+    </mitre>
+  </rule>
+
+  <!-- New executable from Downloads - high severity -->
+  <rule id="100662" level="11">
+    <if_sid>100660</if_sid>
+    <field name="srp.target_path">\\Downloads\\</field>
+    <description>NEW EXECUTABLE from Downloads: $(srp.target_path)</description>
+    <group>srp_new_executable,suspicious,</group>
+    <mitre>
+      <id>T1204.002</id>
+    </mitre>
+  </rule>
+
+  <!-- New executable from Temp - high severity -->
+  <rule id="100663" level="11">
+    <if_sid>100660</if_sid>
+    <field name="srp.target_path">\\Temp\\|\\tmp\\</field>
+    <description>NEW EXECUTABLE from Temp: $(srp.target_path)</description>
+    <group>srp_new_executable,suspicious,</group>
+    <mitre>
+      <id>T1204.002</id>
+    </mitre>
+  </rule>
+
+  <!-- ========== EVENT LOG SRP RULES ========== -->
+
+  <!-- Base rule: SRP event from Windows Event Log -->
+  <rule id="100600" level="0">
+    <if_sid>60009</if_sid>
+    <field name="win.system.providerName">Microsoft-Windows-SoftwareRestrictionPolicies</field>
+    <description>Windows Software Restriction Policy event</description>
+  </rule>
+
+  <!-- Event 865: Access to executable blocked (general) -->
+  <rule id="100610" level="10">
+    <if_sid>100600</if_sid>
+    <field name="win.system.eventID">^865$</field>
+    <description>SRP BLOCKED: Executable access denied by policy</description>
+    <group>srp_blocked,</group>
+    <mitre>
+      <id>T1204</id>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
+  <!-- Event 866: Access blocked by path rule -->
+  <rule id="100611" level="10">
+    <if_sid>100600</if_sid>
+    <field name="win.system.eventID">^866$</field>
+    <description>SRP BLOCKED: Access denied by path rule</description>
+    <group>srp_blocked,path_rule,</group>
+    <mitre>
+      <id>T1204</id>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
+  <!-- Event 867: Access blocked by certificate rule -->
+  <rule id="100612" level="10">
+    <if_sid>100600</if_sid>
+    <field name="win.system.eventID">^867$</field>
+    <description>SRP BLOCKED: Access denied by certificate rule</description>
+    <group>srp_blocked,cert_rule,</group>
+    <mitre>
+      <id>T1204</id>
+      <id>T1553.002</id>
+    </mitre>
+  </rule>
+
+  <!-- Event 868: Access blocked by hash rule -->
+  <rule id="100613" level="10">
+    <if_sid>100600</if_sid>
+    <field name="win.system.eventID">^868$</field>
+    <description>SRP BLOCKED: Access denied by hash rule</description>
+    <group>srp_blocked,hash_rule,</group>
+    <mitre>
+      <id>T1204</id>
+    </mitre>
+  </rule>
+
+  <!-- Higher severity: Blocked in user Temp folder -->
+  <rule id="100620" level="12">
+    <if_sid>100610,100611,100612,100613</if_sid>
+    <match>\\Users\\|\\AppData\\Local\\Temp\\</match>
+    <description>SRP BLOCKED executable in user profile/temp - possible malware</description>
+    <group>srp_blocked,malware,</group>
+    <mitre>
+      <id>T1204.002</id>
+      <id>T1059.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Higher severity: Blocked PowerShell script -->
+  <rule id="100621" level="11">
+    <if_sid>100610,100611,100612,100613</if_sid>
+    <match>.ps1|.psm1|.psd1</match>
+    <description>SRP BLOCKED PowerShell script execution</description>
+    <group>srp_blocked,powershell,</group>
+    <mitre>
+      <id>T1059.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Higher severity: Blocked from Downloads -->
+  <rule id="100622" level="11">
+    <if_sid>100610,100611,100612,100613</if_sid>
+    <match>\\Downloads\\</match>
+    <description>SRP BLOCKED executable from Downloads folder</description>
+    <group>srp_blocked,suspicious,</group>
+    <mitre>
+      <id>T1204.002</id>
+    </mitre>
+  </rule>
+
+</group>
