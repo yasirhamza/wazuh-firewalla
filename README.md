@@ -14,8 +14,8 @@ Integrate your [Firewalla](https://firewalla.com) network security device with [
 
 ```bash
 # Clone the repository
-git clone https://github.com/yasirhamza/firewalla-wazuh.git
-cd firewalla-wazuh
+git clone https://github.com/yasirhamza/wazuh-firewalla.git
+cd wazuh-firewalla
 
 # Configure credentials
 cp .env.example .env
@@ -71,8 +71,9 @@ docker compose up -d
 
 ## Documentation
 
-- [SETUP.md](SETUP.md) - Detailed installation guide
-- [docs/](docs/) - Configuration and troubleshooting
+- [SETUP.md](SETUP.md) - Detailed installation and configuration guide
+- [CHANGELOG.md](CHANGELOG.md) - Version history
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Development guidelines
 
 ## License
 
