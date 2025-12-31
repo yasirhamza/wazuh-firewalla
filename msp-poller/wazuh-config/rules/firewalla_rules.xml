@@ -1,0 +1,243 @@
+<!--
+  Firewalla MSP Rules for Wazuh
+  Rule ID Range: 100200 - 100399
+-->
+
+<group name="firewalla,">
+
+  <!-- Base rule for all Firewalla MSP events - chains from Suricata's JSON base rule -->
+  <rule id="100200" level="3">
+    <if_sid>86600</if_sid>
+    <field name="source">^firewalla-msp$</field>
+    <description>Firewalla MSP: Event received</description>
+  </rule>
+
+  <!-- Alarm events -->
+  <rule id="100201" level="5">
+    <if_sid>100200</if_sid>
+    <field name="event_type">alarm</field>
+    <description>Firewalla Alarm: $(alarm_type) - $(message)</description>
+    <group>firewalla_alarm,</group>
+  </rule>
+
+  <!-- New Device Alarm -->
+  <rule id="100210" level="5">
+    <if_sid>100201</if_sid>
+    <field name="alarm_type">ALARM_NEW_DEVICE</field>
+    <description>Firewalla: New device joined network</description>
+    <group>firewalla_alarm,asset_discovery,</group>
+    <mitre>
+      <id>T1200</id>
+    </mitre>
+  </rule>
+
+  <!-- Abnormal Bandwidth -->
+  <rule id="100211" level="8">
+    <if_sid>100201</if_sid>
+    <field name="alarm_type">ALARM_ABNORMAL_BANDWIDTH</field>
+    <description>Firewalla: Abnormal bandwidth detected</description>
+    <group>firewalla_alarm,anomaly,</group>
+  </rule>
+
+  <!-- Threat Intelligence Match -->
+  <rule id="100212" level="10">
+    <if_sid>100201</if_sid>
+    <field name="alarm_type">ALARM_INTEL</field>
+    <description>Firewalla: Threat intelligence match</description>
+    <group>firewalla_alarm,threat_intel,</group>
+    <mitre>
+      <id>T1071</id>
+    </mitre>
+  </rule>
+
+  <!-- Vulnerability Detected -->
+  <rule id="100213" level="9">
+    <if_sid>100201</if_sid>
+    <field name="alarm_type">ALARM_VULNERABILITY</field>
+    <description>Firewalla: Vulnerability detected</description>
+    <group>firewalla_alarm,vulnerability,</group>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+  </rule>
+
+  <!-- Spoofing Detected -->
+  <rule id="100214" level="12">
+    <if_sid>100201</if_sid>
+    <field name="alarm_type">ALARM_SPOOFING</field>
+    <description>Firewalla: Spoofing attack detected</description>
+    <group>firewalla_alarm,attack,</group>
+    <mitre>
+      <id>T1557</id>
+    </mitre>
+  </rule>
+
+  <!-- Large Upload -->
+  <rule id="100217" level="7">
+    <if_sid>100201</if_sid>
+    <field name="alarm_type">ALARM_LARGE_UPLOAD</field>
+    <description>Firewalla: Large upload detected</description>
+    <group>firewalla_alarm,data_exfiltration,</group>
+    <mitre>
+      <id>T1048</id>
+    </mitre>
+  </rule>
+
+  <!-- Port Scan Detected -->
+  <rule id="100220" level="10">
+    <if_sid>100201</if_sid>
+    <field name="alarm_type">ALARM_PORTSCAN</field>
+    <description>Firewalla: Port scan detected</description>
+    <group>firewalla_alarm,recon,</group>
+    <mitre>
+      <id>T1046</id>
+    </mitre>
+  </rule>
+
+  <!-- Device Change Events -->
+  <rule id="100300" level="3">
+    <if_sid>100200</if_sid>
+    <field name="event_type">device_change</field>
+    <description>Firewalla Device Change: $(change_type)</description>
+    <group>firewalla_device,</group>
+  </rule>
+
+  <rule id="100301" level="5">
+    <if_sid>100300</if_sid>
+    <field name="change_type">new_device</field>
+    <description>Firewalla: New device discovered on network</description>
+    <group>firewalla_device,asset_discovery,</group>
+    <mitre>
+      <id>T1200</id>
+    </mitre>
+  </rule>
+
+  <rule id="100302" level="4">
+    <if_sid>100300</if_sid>
+    <field name="change_type">device_removed</field>
+    <description>Firewalla: Device removed from network</description>
+    <group>firewalla_device,asset_removed,</group>
+  </rule>
+
+  <rule id="100303" level="3">
+    <if_sid>100300</if_sid>
+    <field name="change_type">device_changed</field>
+    <description>Firewalla: Device configuration changed</description>
+    <group>firewalla_device,asset_changed,</group>
+  </rule>
+
+  <!-- Flow Events -->
+  <rule id="100400" level="3">
+    <if_sid>100200</if_sid>
+    <field name="event_type">flow</field>
+    <description>Firewalla Flow: $(srcuser) -> $(url)</description>
+    <group>firewalla_flow,</group>
+  </rule>
+
+  <!-- Blocked Traffic -->
+  <rule id="100410" level="5">
+    <if_sid>100400</if_sid>
+    <field name="flow.blocked">true</field>
+    <description>Firewalla: Blocked connection from $(srcuser) to $(url)</description>
+    <group>firewalla_flow,blocked,</group>
+  </rule>
+
+  <!-- Ad/Tracker Block -->
+  <rule id="100411" level="3">
+    <if_sid>100410</if_sid>
+    <field name="flow.blocked_by">adblock</field>
+    <description>Firewalla: Ad/tracker blocked - $(url)</description>
+    <group>firewalla_flow,adblock,</group>
+  </rule>
+
+  <!-- Security Block (not ad-related) -->
+  <rule id="100412" level="8">
+    <if_sid>100410</if_sid>
+    <field name="flow.blocked_by">^(?!adblock).</field>
+    <description>Firewalla: Security block - $(srcuser) to $(url) by $(flow.blocked_by)</description>
+    <group>firewalla_flow,security_block,</group>
+    <mitre>
+      <id>T1071</id>
+    </mitre>
+  </rule>
+
+  <!-- High Bandwidth Flow (>1MB) -->
+  <rule id="100420" level="4">
+    <if_sid>100400</if_sid>
+    <field name="flow.bytes_total">^[0-9]{7,}$</field>
+    <description>Firewalla: High bandwidth - $(srcuser) to $(url) ($(flow.bytes_total) bytes)</description>
+    <group>firewalla_flow,high_bandwidth,</group>
+  </rule>
+
+  <!-- Uncategorized External Connection -->
+  <rule id="100421" level="5">
+    <if_sid>100400</if_sid>
+    <field name="flow.category">^$</field>
+    <field name="flow.blocked">false</field>
+    <description>Firewalla: Uncategorized connection - $(srcuser) to $(url)</description>
+    <group>firewalla_flow,uncategorized,</group>
+  </rule>
+
+  <!-- Threat Intel CDB List Matches -->
+  <rule id="100450" level="12">
+    <if_sid>100400</if_sid>
+    <list field="dstip" lookup="address_match_key">etc/lists/threat-intel/feodo-ips</list>
+    <description>Firewalla: Connection to Feodo Tracker C2 IP - $(srcuser) to $(dstip)</description>
+    <group>firewalla_flow,threat_intel,c2,banking_trojan,</group>
+  </rule>
+
+  <rule id="100451" level="10">
+    <if_sid>100400</if_sid>
+    <list field="dstip" lookup="address_match_key">etc/lists/threat-intel/threatfox-ips</list>
+    <description>Firewalla: Connection to ThreatFox C2 IP - $(srcuser) to $(dstip)</description>
+    <group>firewalla_flow,threat_intel,c2,</group>
+  </rule>
+
+</group>
+
+<!-- ========================================
+     Sidecar Status Monitoring Rules
+     ======================================== -->
+<group name="sidecar,">
+
+  <!-- Base rule for sidecar status events -->
+  <rule id="100500" level="3">
+    <if_sid>86600</if_sid>
+    <field name="event_type">^sidecar_status$</field>
+    <description>Sidecar: Status event from $(sidecar)</description>
+    <group>sidecar_status,</group>
+  </rule>
+
+  <!-- Successful sync job -->
+  <rule id="100501" level="3">
+    <if_sid>100500</if_sid>
+    <field name="sync_status">^success$</field>
+    <description>Sidecar: $(sidecar) - $(job_type) completed successfully</description>
+    <group>sidecar_status,sidecar_success,</group>
+  </rule>
+
+  <!-- Sync job error -->
+  <rule id="100502" level="7">
+    <if_sid>100500</if_sid>
+    <field name="sync_status">^error$</field>
+    <description>Sidecar: $(sidecar) - $(job_type) failed</description>
+    <group>sidecar_status,sidecar_error,</group>
+  </rule>
+
+  <!-- Heartbeat -->
+  <rule id="100503" level="2">
+    <if_sid>100500</if_sid>
+    <field name="job_type">^heartbeat$</field>
+    <description>Sidecar: $(sidecar) heartbeat - running normally</description>
+    <group>sidecar_status,sidecar_heartbeat,</group>
+  </rule>
+
+  <!-- Multiple errors (3+ in short period) - higher severity -->
+  <rule id="100504" level="10" frequency="3" timeframe="600">
+    <if_matched_sid>100502</if_matched_sid>
+    <same_field>sidecar</same_field>
+    <description>Sidecar: $(sidecar) - Multiple sync errors detected</description>
+    <group>sidecar_status,sidecar_error,</group>
+  </rule>
+
+</group>

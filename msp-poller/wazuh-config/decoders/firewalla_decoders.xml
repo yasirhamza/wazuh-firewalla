@@ -1,0 +1,15 @@
+<!--
+  Firewalla MSP API Decoders for Wazuh
+  Decodes JSON events from the MSP poller
+-->
+
+<!-- Parent decoder for all Firewalla MSP events -->
+<decoder name="firewalla-msp">
+  <prematch>^{"timestamp":</prematch>
+</decoder>
+
+<!-- Extract source field to confirm it's from Firewalla MSP -->
+<decoder name="firewalla-msp-json">
+  <parent>firewalla-msp</parent>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
