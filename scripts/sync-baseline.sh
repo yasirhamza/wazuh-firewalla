@@ -3,12 +3,10 @@
 # sync-baseline.sh - Sync SRP baseline from Windows agent to Wazuh Manager
 #
 # Modes:
-#   ./sync-baseline.sh --decode <agent_id> <base64_data>   # Decode and save CDB
-#   ./sync-baseline.sh --from-alert                         # Called by active response
-#   ./sync-baseline.sh <agent_id>                           # Check for uploaded file
+#   ./sync-baseline.sh                                       # Active response (reads JSON from stdin)
+#   ./sync-baseline.sh --decode <agent_id> <base64_data>     # Decode and save CDB
+#   ./sync-baseline.sh <agent_id>                            # Check for uploaded file
 #
-
-set -e
 
 WAZUH_DIR="/var/ossec"
 CDB_LIST_DIR="$WAZUH_DIR/etc/lists/srp"
@@ -17,7 +15,6 @@ LOG_FILE="$WAZUH_DIR/logs/baseline-sync.log"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
-    echo "$1"
 }
 
 # Ensure CDB directory exists
@@ -56,30 +53,38 @@ if [[ "$1" == "--decode" ]]; then
     exit 0
 fi
 
-# Mode: Called from active response with alert JSON on stdin
-if [[ "$1" == "--from-alert" ]]; then
+# Mode: Active Response - reads alert JSON from stdin (default when no args)
+if [[ -z "$1" ]]; then
+    # Read the alert JSON from stdin (Wazuh active response format)
     read -r INPUT
 
-    AGENT_ID=$(echo "$INPUT" | jq -r '.agent.id // empty')
-    CDB_DATA=$(echo "$INPUT" | jq -r '.data.srp.cdb_data // empty')
+    log "Active response triggered, processing alert"
+
+    # Extract fields using grep/sed (no jq dependency)
+    # Look for agent.id in the JSON
+    AGENT_ID=$(echo "$INPUT" | grep -oP '"agent"\s*:\s*\{[^}]*"id"\s*:\s*"\K[^"]+' 2>/dev/null || true)
+
+    # Look for srp.cdb_data in the JSON
+    CDB_DATA=$(echo "$INPUT" | grep -oP '"cdb_data"\s*:\s*"\K[^"]+' 2>/dev/null || true)
 
     if [[ -z "$AGENT_ID" || -z "$CDB_DATA" ]]; then
-        log "ERROR: Missing agent.id or srp.cdb_data in alert"
+        log "ERROR: Missing agent.id or srp.cdb_data in alert. Input: ${INPUT:0:500}"
         exit 1
     fi
 
+    log "Processing CDB upload from agent $AGENT_ID"
     exec "$0" --decode "$AGENT_ID" "$CDB_DATA"
 fi
 
 # Mode: Manual check for agent
 AGENT_ID="$1"
 
-if [[ -z "$AGENT_ID" ]]; then
+if [[ "$AGENT_ID" == "--help" || "$AGENT_ID" == "-h" ]]; then
     echo "Usage:"
-    echo "  $0 --decode <agent_id> <base64_data>  Decode and save CDB"
-    echo "  $0 --from-alert                        Process alert from stdin"
-    echo "  $0 <agent_id>                          Check for uploaded file"
-    exit 1
+    echo "  $0                                       Active response mode (reads JSON from stdin)"
+    echo "  $0 --decode <agent_id> <base64_data>    Decode and save CDB"
+    echo "  $0 <agent_id>                           Check for uploaded file"
+    exit 0
 fi
 
 log "Checking for baseline from agent $AGENT_ID"
