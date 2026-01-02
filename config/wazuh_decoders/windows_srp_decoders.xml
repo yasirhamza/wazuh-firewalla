@@ -38,6 +38,20 @@
 
 <decoder name="srp-baseline-sync-fields">
   <parent>srp-baseline-sync</parent>
-  <regex>^BASELINE_SYNC\|(\S+)\|entries:(\d+)\|file:(\.*)</regex>
+  <regex type="pcre2">^BASELINE_SYNC\|(\S+)\|entries:(\d+)\|file:(.+)$</regex>
   <order>srp.sync_timestamp, srp.entry_count, srp.cdb_file</order>
+</decoder>
+
+<!--
+  CDB Upload Decoder - captures base64-encoded CDB file from agent
+  Log format: CDB_UPLOAD|entries:<count>|data:<base64>
+-->
+<decoder name="srp-cdb-upload">
+  <prematch>^CDB_UPLOAD\|</prematch>
+</decoder>
+
+<decoder name="srp-cdb-upload-fields">
+  <parent>srp-cdb-upload</parent>
+  <regex type="pcre2">^CDB_UPLOAD\|entries:(\d+)\|data:(.+)$</regex>
+  <order>srp.entry_count, srp.cdb_data</order>
 </decoder>
