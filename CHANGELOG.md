@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2025-01-02
+
+### Added
+- Enriched SRP log format support with timestamp and file hashes
+  - New `windows-srp-enriched` decoder extracts `srp.timestamp`, `srp.sha256`, `srp.sha1`
+  - Backwards compatible with standard (non-enriched) log format
+- ExeMonitor.ps1 `-ConvertAndEnrichSaferLog` flag for SIEM-ready log enrichment
+
+### Changed
+- Updated `windows_srp_decoders.xml` to support both standard and enriched formats
+
 ## [1.0.0] - 2024-12-31
 
 ### Features
