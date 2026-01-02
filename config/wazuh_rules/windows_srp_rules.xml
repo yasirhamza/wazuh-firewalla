@@ -3,8 +3,9 @@
   Rule IDs: 100600-100699
 
   Sources:
-  1. Windows Application Event Log (Provider: SoftwareRestrictionPolicies, Event IDs: 865-868)
-  2. SRP Log File (C:\ParentalControl\Logs\*.log) - contains both allowed and blocked events
+  1. Windows Application Event Log (Provider: SoftwareRestrictionPolicies, Event IDs: 865-868) - logs BLOCKED events
+  2. SRP Log File (C:\ParentalControl\Logs\*.log) - logs ALLOWED executables (Unrestricted)
+     Note: Blocked events are logged to Windows Event Viewer by default, not the SAFER.log file
 -->
 
 <group name="windows,srp,policy,">
@@ -104,6 +105,23 @@
     <mitre>
       <id>T1204.002</id>
     </mitre>
+  </rule>
+
+  <!-- ========== BASELINE SYNC RULES ========== -->
+
+  <!-- Baseline sync event -->
+  <rule id="100670" level="3">
+    <decoded_as>srp-baseline-sync</decoded_as>
+    <description>SRP baseline CDB updated: $(srp.entry_count) entries</description>
+    <group>srp_baseline,</group>
+  </rule>
+
+  <!-- Large baseline update (more than 1000 entries) -->
+  <rule id="100671" level="5">
+    <if_sid>100670</if_sid>
+    <field name="srp.entry_count" type="pcre2">\d{4,}</field>
+    <description>SRP baseline CDB major update: $(srp.entry_count) entries</description>
+    <group>srp_baseline,</group>
   </rule>
 
   <!-- ========== EVENT LOG SRP RULES ========== -->
