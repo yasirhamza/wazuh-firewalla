@@ -20,15 +20,6 @@
     <frequency>5</frequency>
   </localfile>
 
-  <!-- CDB baseline upload - base64 encoded, runs hourly -->
-  <!-- Triggers rule 100672 which can invoke active response to save CDB on manager -->
-  <localfile>
-    <log_format>full_command</log_format>
-    <command>powershell -NoProfile -Command "$f=\"C:\ParentalControl\Data\srp_baseline.cdb\"; if(Test-Path $f){$b=[Convert]::ToBase64String([IO.File]::ReadAllBytes($f)); $c=(Get-Content $f).Count; Write-Output \"CDB_UPLOAD|entries:$c|data:$b\"}"</command>
-    <frequency>3600</frequency>
-    <alias>srp-cdb-upload</alias>
-  </localfile>
-
   <!-- Windows Application Event Log for SRP blocked events -->
   <localfile>
     <location>Application</location>

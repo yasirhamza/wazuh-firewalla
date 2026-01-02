@@ -124,13 +124,6 @@
     <group>srp_baseline,</group>
   </rule>
 
-  <!-- CDB Upload received from agent - triggers active response to save -->
-  <rule id="100672" level="3">
-    <decoded_as>srp-cdb-upload</decoded_as>
-    <description>SRP baseline CDB upload received: $(srp.entry_count) entries</description>
-    <group>srp_baseline,srp_cdb_upload,</group>
-  </rule>
-
   <!-- ========== EVENT LOG SRP RULES ========== -->
 
   <!-- Base rule: SRP event from Windows Event Log -->
