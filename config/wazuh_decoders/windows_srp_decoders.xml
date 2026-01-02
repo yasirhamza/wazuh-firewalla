@@ -14,11 +14,12 @@
 </decoder>
 
 <!-- Enriched format with timestamp and hashes - MUST be before standard format -->
+<!-- Outputs to standard file.hash.* fields for native threat intel integration -->
 <decoder name="windows-srp-enriched">
   <parent>windows-srp</parent>
   <prematch offset="after_parent">SHA256:</prematch>
   <regex type="pcre2" offset="after_parent">(.+?) as (\S+) using (.+?), Guid = \{[^}]+\}\|([^|]+)\|SHA256:([^|]*)\|SHA1:(\S*)</regex>
-  <order>srp.target_path, srp.decision, srp.rule_type, srp.timestamp, srp.sha256, srp.sha1</order>
+  <order>srp.target_path, srp.decision, srp.rule_type, srp.timestamp, file.hash.sha256, file.hash.sha1</order>
 </decoder>
 
 <!-- Standard format (non-enriched) -->
@@ -42,3 +43,16 @@
   <order>srp.sync_timestamp, srp.entry_count, srp.cdb_file</order>
 </decoder>
 
+<!--
+  CDB Upload Decoder - captures base64-encoded CDB file from agent
+  Log format: CDB_UPLOAD|entries:<count>|data:<base64>
+-->
+<decoder name="srp-cdb-upload">
+  <prematch>^CDB_UPLOAD\|</prematch>
+</decoder>
+
+<decoder name="srp-cdb-upload-fields">
+  <parent>srp-cdb-upload</parent>
+  <regex type="pcre2">^CDB_UPLOAD\|entries:(\d+)\|data:(.+)$</regex>
+  <order>srp.entry_count, srp.cdb_data</order>
+</decoder>
