@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `windows-srp-enriched` decoder extracts `srp.timestamp`, `srp.sha256`, `srp.sha1`
   - Backwards compatible with standard (non-enriched) log format
 - ExeMonitor.ps1 `-ConvertAndEnrichSaferLog` flag for SIEM-ready log enrichment
+- ExeMonitor.ps1 `-ExportCDB` flag to export baseline in Wazuh CDB format
+- Manager-side `scripts/sync-baseline.sh` for syncing baseline from Windows agents
+- Updated agent configuration with baseline-sync.log collection
 
 ### Changed
 - Updated `windows_srp_decoders.xml` to support both standard and enriched formats
