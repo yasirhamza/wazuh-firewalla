@@ -13,10 +13,20 @@
     <frequency>5</frequency>
   </localfile>
 
-  <!-- Baseline sync events - triggered by ExeMonitor.ps1 -ExportCDB -->
+  <!-- Baseline sync events for CDB tracking -->
   <localfile>
     <location>C:\ParentalControl\Logs\baseline-sync.log</location>
     <log_format>syslog</log_format>
+    <frequency>5</frequency>
+  </localfile>
+
+  <!-- CDB baseline upload - base64 encoded, runs hourly -->
+  <!-- Triggers rule 100672 which can invoke active response to save CDB on manager -->
+  <localfile>
+    <log_format>full_command</log_format>
+    <command>powershell -NoProfile -Command "$f=\"C:\ParentalControl\Data\srp_baseline.cdb\"; if(Test-Path $f){$b=[Convert]::ToBase64String([IO.File]::ReadAllBytes($f)); $c=(Get-Content $f).Count; Write-Output \"CDB_UPLOAD|entries:$c|data:$b\"}"</command>
+    <frequency>3600</frequency>
+    <alias>srp-cdb-upload</alias>
   </localfile>
 
   <!-- Windows Application Event Log for SRP blocked events -->
@@ -24,20 +34,4 @@
     <location>Application</location>
     <log_format>eventchannel</log_format>
   </localfile>
-
-  <!--
-    For baseline CDB file sync to manager, use one of these methods:
-
-    Method 1: Scheduled task on Windows to copy file via agent upload
-    (requires wodle command or active response on manager)
-
-    Method 2: Use logcollector command to output CDB content as log
-    <localfile>
-      <log_format>command</log_format>
-      <command>type C:\ParentalControl\Data\srp_baseline.cdb</command>
-      <frequency>3600</frequency>
-    </localfile>
-
-    Method 3: Manual sync via Wazuh API or file share
-  -->
 </agent_config>
