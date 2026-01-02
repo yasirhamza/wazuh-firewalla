@@ -5,7 +5,7 @@
   Standard format:
     <process> (PID = <pid>) identified <path> as <decision> using <rule_type>, Guid = {<guid>}
 
-  Enriched format (with -Enrich flag):
+  Enriched format (via -ConvertAndEnrichSaferLog):
     <standard>|<timestamp>|SHA256:<hash>|SHA1:<hash>
 -->
 
@@ -25,4 +25,18 @@
   <parent>windows-srp</parent>
   <regex>^(\S+) \pPID = (\d+)\p identified (\.*) as (\S+) using (\.*), Guid = \S+}\|(\S+)\|SHA256:(\S*)\|SHA1:(\S*)$</regex>
   <order>srp.parent_process, srp.parent_pid, srp.target_path, srp.decision, srp.rule_type, srp.timestamp, srp.sha256, srp.sha1</order>
+</decoder>
+
+<!--
+  Baseline Sync Event Decoder
+  Log format: BASELINE_SYNC|<timestamp>|entries:<count>|file:<path>
+-->
+<decoder name="srp-baseline-sync">
+  <prematch>^BASELINE_SYNC\|</prematch>
+</decoder>
+
+<decoder name="srp-baseline-sync-fields">
+  <parent>srp-baseline-sync</parent>
+  <regex>^BASELINE_SYNC\|(\S+)\|entries:(\d+)\|file:(\.*)</regex>
+  <order>srp.sync_timestamp, srp.entry_count, srp.cdb_file</order>
 </decoder>
