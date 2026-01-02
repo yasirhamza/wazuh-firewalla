@@ -2,15 +2,27 @@
   Windows Software Restriction Policy (SRP) Log Decoder
   Log location: C:\ParentalControl\Logs\*.log
 
-  Format: <process> (PID = <pid>) identified <path> as <decision> using <rule_type>, Guid = {<guid>}
+  Standard format:
+    <process> (PID = <pid>) identified <path> as <decision> using <rule_type>, Guid = {<guid>}
+
+  Enriched format (with -Enrich flag):
+    <standard>|<timestamp>|SHA256:<hash>|SHA1:<hash>
 -->
 
 <decoder name="windows-srp">
   <prematch>PID = \d+\p identified </prematch>
 </decoder>
 
+<!-- Standard format (non-enriched) -->
 <decoder name="windows-srp-fields">
   <parent>windows-srp</parent>
-  <regex>^(\S+) \pPID = (\d+)\p identified (\.*) as (\S+) using (\.*), Guid = </regex>
+  <regex>^(\S+) \pPID = (\d+)\p identified (\.*) as (\S+) using (\.*), Guid = \S+}$</regex>
   <order>srp.parent_process, srp.parent_pid, srp.target_path, srp.decision, srp.rule_type</order>
+</decoder>
+
+<!-- Enriched format with timestamp and hashes -->
+<decoder name="windows-srp-enriched">
+  <parent>windows-srp</parent>
+  <regex>^(\S+) \pPID = (\d+)\p identified (\.*) as (\S+) using (\.*), Guid = \S+}\|(\S+)\|SHA256:(\S*)\|SHA1:(\S*)$</regex>
+  <order>srp.parent_process, srp.parent_pid, srp.target_path, srp.decision, srp.rule_type, srp.timestamp, srp.sha256, srp.sha1</order>
 </decoder>
