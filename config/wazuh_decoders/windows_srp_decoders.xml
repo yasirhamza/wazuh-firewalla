@@ -13,18 +13,19 @@
   <prematch>PID = \d+\p identified </prematch>
 </decoder>
 
+<!-- Enriched format with timestamp and hashes - MUST be before standard format -->
+<decoder name="windows-srp-enriched">
+  <parent>windows-srp</parent>
+  <prematch offset="after_parent">SHA256:</prematch>
+  <regex type="pcre2" offset="after_parent">(.+?) as (\S+) using (.+?), Guid = \{[^}]+\}\|([^|]+)\|SHA256:([^|]*)\|SHA1:(\S*)</regex>
+  <order>srp.target_path, srp.decision, srp.rule_type, srp.timestamp, srp.sha256, srp.sha1</order>
+</decoder>
+
 <!-- Standard format (non-enriched) -->
 <decoder name="windows-srp-fields">
   <parent>windows-srp</parent>
-  <regex>^(\S+) \pPID = (\d+)\p identified (\.*) as (\S+) using (\.*), Guid = \S+}$</regex>
-  <order>srp.parent_process, srp.parent_pid, srp.target_path, srp.decision, srp.rule_type</order>
-</decoder>
-
-<!-- Enriched format with timestamp and hashes -->
-<decoder name="windows-srp-enriched">
-  <parent>windows-srp</parent>
-  <regex>^(\S+) \pPID = (\d+)\p identified (\.*) as (\S+) using (\.*), Guid = \S+}\|(\S+)\|SHA256:(\S*)\|SHA1:(\S*)$</regex>
-  <order>srp.parent_process, srp.parent_pid, srp.target_path, srp.decision, srp.rule_type, srp.timestamp, srp.sha256, srp.sha1</order>
+  <regex type="pcre2" offset="after_parent">(.+?) as (\S+) using (.+?), Guid = \{[^}]+\}$</regex>
+  <order>srp.target_path, srp.decision, srp.rule_type</order>
 </decoder>
 
 <!--
