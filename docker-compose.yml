@@ -50,6 +50,7 @@ services:
       - ./config/wazuh_rules/windows_srp_rules.xml:/var/ossec/etc/rules/windows_srp_rules.xml:ro
       - threat_intel_lists:/var/ossec/etc/lists/threat-intel
       - ./config/wazuh_lists:/var/ossec/etc/lists/srp:rw
+      - ./scripts/sync-baseline.sh:/var/ossec/active-response/bin/sync-baseline.sh:ro
       - ./config/filebeat_pipeline/pipeline.json:/usr/share/filebeat/module/wazuh/alerts/ingest/pipeline.json:ro
     healthcheck:
       test: ["CMD-SHELL", "/var/ossec/bin/wazuh-control status | grep -q 'wazuh-analysisd is running'"]

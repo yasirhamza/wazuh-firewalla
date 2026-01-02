@@ -1,0 +1,43 @@
+<!--
+  Wazuh Agent Configuration for Windows SRP Monitoring
+
+  Add this to your Wazuh agent.conf (on the manager) or local ossec.conf (on the agent)
+  Location: /var/ossec/etc/shared/default/agent.conf (manager centralized config)
+           or C:\Program Files (x86)\ossec-agent\ossec.conf (local agent config)
+-->
+<agent_config os="Windows">
+  <!-- Windows SRP logs - UTF-8 enriched by ExeMonitor.ps1 -ConvertAndEnrichSaferLog -->
+  <localfile>
+    <location>C:\ParentalControl\Logs\SAFER-UTF8.log</location>
+    <log_format>syslog</log_format>
+    <frequency>5</frequency>
+  </localfile>
+
+  <!-- Baseline sync events - triggered by ExeMonitor.ps1 -ExportCDB -->
+  <localfile>
+    <location>C:\ParentalControl\Logs\baseline-sync.log</location>
+    <log_format>syslog</log_format>
+  </localfile>
+
+  <!-- Windows Application Event Log for SRP blocked events -->
+  <localfile>
+    <location>Application</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+
+  <!--
+    For baseline CDB file sync to manager, use one of these methods:
+
+    Method 1: Scheduled task on Windows to copy file via agent upload
+    (requires wodle command or active response on manager)
+
+    Method 2: Use logcollector command to output CDB content as log
+    <localfile>
+      <log_format>command</log_format>
+      <command>type C:\ParentalControl\Data\srp_baseline.cdb</command>
+      <frequency>3600</frequency>
+    </localfile>
+
+    Method 3: Manual sync via Wazuh API or file share
+  -->
+</agent_config>
