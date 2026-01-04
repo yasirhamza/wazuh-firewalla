@@ -10,10 +10,11 @@
 -->
 
 <decoder name="windows-srp">
-  <prematch>PID = \d+\p identified </prematch>
+  <prematch>PID = \d+\) identified </prematch>
 </decoder>
 
 <!-- Enriched format with timestamp and hashes - MUST be before standard format -->
+<!-- Note: Using srp.sha256/sha1 because data.file is already mapped as keyword in ES -->
 <decoder name="windows-srp-enriched">
   <parent>windows-srp</parent>
   <prematch offset="after_parent">SHA256:</prematch>
