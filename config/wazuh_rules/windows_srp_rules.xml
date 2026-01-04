@@ -60,18 +60,58 @@
     </mitre>
   </rule>
 
+  <!-- ========== THREAT INTELLIGENCE RULES ========== -->
+
+  <!-- Match SHA256 against known malware hashes -->
+  <rule id="100655" level="15">
+    <if_sid>100651</if_sid>
+    <list field="srp.sha256" lookup="match_key">etc/lists/malware-hashes</list>
+    <description>MALWARE DETECTED: $(srp.target_path) matches known malware hash</description>
+    <group>srp_malware,threat_intel,</group>
+    <mitre>
+      <id>T1204.002</id>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
+  <!-- Match SHA1 against known malware hashes (fallback) -->
+  <rule id="100656" level="15">
+    <if_sid>100651</if_sid>
+    <list field="srp.sha1" lookup="match_key">etc/lists/malware-hashes</list>
+    <description>MALWARE DETECTED: $(srp.target_path) matches known malware hash (SHA1)</description>
+    <group>srp_malware,threat_intel,</group>
+    <mitre>
+      <id>T1204.002</id>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
   <!-- ========== BASELINE DETECTION RULES ========== -->
 
   <!-- New executable not in baseline (level 7 = alert worthy) -->
-  <!-- Note: Baseline list uses lowercase paths for matching -->
+  <!-- Note: Baseline CDB uses SHA256 hashes as keys for reliable matching -->
   <rule id="100660" level="7">
     <if_sid>100651</if_sid>
-    <list field="srp.target_path" lookup="not_match_key">etc/lists/srp/srp_baseline</list>
-    <description>NEW EXECUTABLE: $(srp.target_path) not in baseline</description>
+    <list field="srp.sha256" lookup="not_match_key">etc/lists/srp/srp_baseline</list>
+    <description>NEW EXECUTABLE: $(srp.target_path) (hash not in baseline)</description>
     <group>srp_new_executable,</group>
     <mitre>
       <id>T1204</id>
     </mitre>
+  </rule>
+
+  <!-- Filter out PowerShell policy test files from new executable detection -->
+  <rule id="100664" level="0">
+    <if_sid>100660</if_sid>
+    <field name="srp.target_path">__PSScriptPolicyTest_</field>
+    <description>PowerShell policy test - excluded from new executable detection</description>
+  </rule>
+
+  <!-- Filter out events with empty hash - can't do reliable baseline lookup -->
+  <rule id="100665" level="0">
+    <if_sid>100660</if_sid>
+    <field name="srp.sha256">^$</field>
+    <description>SRP event without hash - baseline lookup not possible</description>
   </rule>
 
   <!-- New executable in user profile - higher severity -->
@@ -122,13 +162,6 @@
     <field name="srp.entry_count" type="pcre2">\d{4,}</field>
     <description>SRP baseline CDB major update: $(srp.entry_count) entries</description>
     <group>srp_baseline,</group>
-  </rule>
-
-  <!-- CDB Upload received from agent - triggers active response to save -->
-  <rule id="100672" level="3">
-    <decoded_as>srp-cdb-upload</decoded_as>
-    <description>SRP baseline CDB upload received: $(srp.entry_count) entries</description>
-    <group>srp_baseline,srp_cdb_upload,</group>
   </rule>
 
   <!-- ========== EVENT LOG SRP RULES ========== -->
