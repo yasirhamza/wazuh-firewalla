@@ -126,6 +126,9 @@ services:
       - LOG_DIR=/logs
       - STATE_DIR=/state
       - STATUS_DIR=/status
+      - INDEXER_URL=https://wazuh.indexer:9200
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=${INDEXER_PASSWORD}
     volumes:
       - msp_logs:/logs
       - msp_state:/state
