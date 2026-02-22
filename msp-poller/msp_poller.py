@@ -31,6 +31,11 @@ LOG_DIR = Path(os.environ.get("LOG_DIR", "/logs"))
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
 STATUS_DIR = Path(os.environ.get("STATUS_DIR", "/status"))
 
+# OpenSearch connection for startup state sync
+INDEXER_URL = os.environ.get("INDEXER_URL", "")
+INDEXER_USERNAME = os.environ.get("INDEXER_USERNAME", "admin")
+INDEXER_PASSWORD = os.environ.get("INDEXER_PASSWORD", "")
+
 # Log rotation settings
 MAX_LOG_SIZE = int(os.environ.get("MAX_LOG_SIZE", 50 * 1024 * 1024))  # 50MB default
 MAX_LOG_BACKUPS = int(os.environ.get("MAX_LOG_BACKUPS", 2))  # Keep 2 backup files
@@ -570,6 +575,36 @@ def wait_for_directories(log_dir: Path, state_dir: Path, timeout: int = 300):
             time.sleep(5)
 
 
+def sync_state_from_indexer(state: StateManager, indexer: IndexerClient):
+    """At startup, rewind state files to match the latest indexed timestamps.
+
+    If analysisd was down during a previous run, events written to log files
+    may have been dropped. This rewinds the state so the next poll re-fetches
+    the gap from the MSP API (which retains 30 days of data).
+    """
+    logger.info("Syncing state with OpenSearch indexer...")
+
+    for event_type, get_ts, set_ts, label in [
+        ("alarm", state.get_last_alarm_ts, state.set_last_alarm_ts, "alarm"),
+        ("flow",  state.get_last_flow_ts,  state.set_last_flow_ts,  "flow"),
+    ]:
+        state_ts = get_ts()
+        indexer_ts = indexer.get_latest_event_ts(event_type)
+
+        if indexer_ts is None:
+            logger.warning(f"  {label}: indexer unreachable or no data — using state file ({datetime.fromtimestamp(state_ts, tz=timezone.utc)})")
+            continue
+
+        if indexer_ts < state_ts:
+            logger.info(
+                f"  {label}: rewinding state from {datetime.fromtimestamp(state_ts, tz=timezone.utc)} "
+                f"→ {datetime.fromtimestamp(indexer_ts, tz=timezone.utc)} (gap: {(state_ts - indexer_ts)/3600:.1f}h)"
+            )
+            set_ts(indexer_ts)
+        else:
+            logger.info(f"  {label}: in sync at {datetime.fromtimestamp(indexer_ts, tz=timezone.utc)}")
+
+
 def poll_alarms(client: FirewallaMSPClient, state: StateManager, writer: LogWriter, status: StatusReporter = None):
     """Poll for new alarms with full pagination support"""
     last_ts = state.get_last_alarm_ts()
@@ -758,6 +793,14 @@ def main():
         logger.info(f"Connected successfully. Found {len(boxes)} Firewalla boxes.")
     else:
         logger.warning("Could not retrieve boxes. Check API credentials.")
+
+    # Sync state with OpenSearch to recover any events dropped while analysisd was down
+    if INDEXER_URL:
+        logger.info(f"Indexer state sync enabled ({INDEXER_URL})")
+        indexer = IndexerClient(INDEXER_URL, INDEXER_USERNAME, INDEXER_PASSWORD)
+        sync_state_from_indexer(state, indexer)
+    else:
+        logger.info("INDEXER_URL not set, skipping indexer state sync")
 
     # Polling loop
     last_alarm_poll = 0
