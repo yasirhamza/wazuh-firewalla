@@ -53,9 +53,9 @@ services:
       - ./scripts/sync-baseline.sh:/var/ossec/active-response/bin/sync-baseline.sh:ro
       - ./config/filebeat_pipeline/pipeline.json:/usr/share/filebeat/module/wazuh/alerts/ingest/pipeline.json:ro
     healthcheck:
-      test: ["CMD-SHELL", "/var/ossec/bin/wazuh-control status | grep -q 'wazuh-analysisd is running'"]
+      test: ["CMD-SHELL", "/var/ossec/bin/wazuh-control status | grep -q 'wazuh-analysisd is running' || (rm -f /var/ossec/var/run/wazuh-analysisd-*.pid && /var/ossec/bin/wazuh-analysisd && sleep 3 && /var/ossec/bin/wazuh-control status | grep -q 'wazuh-analysisd is running')"]
       interval: 30s
-      timeout: 10s
+      timeout: 20s
       retries: 5
       start_period: 90s
 
