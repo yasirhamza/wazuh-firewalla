@@ -11,10 +11,13 @@ import sys
 import json
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from dateutil import parser as dateparser
 
 # Configuration from environment
@@ -198,6 +201,58 @@ class FirewallaMSPClient:
         if page > 0:
             logger.info(f"Fetched {page + 1} flow pages, total {len(all_flows)} flows")
         return all_flows
+
+
+class IndexerClient:
+    """Queries OpenSearch to find the latest indexed firewalla event timestamps."""
+
+    def __init__(self, url: str, username: str, password: str):
+        self.url = url.rstrip("/")
+        self.auth = (username, password)
+        self.session = requests.Session()
+        self.session.auth = self.auth
+        self.session.verify = False
+
+    def get_latest_event_ts(self, event_type: str) -> "Optional[float]":
+        """Return Unix timestamp of the latest indexed firewalla event of the given type.
+
+        Returns None if OpenSearch is unreachable or has no matching events.
+        """
+        try:
+            response = self.session.post(
+                f"{self.url}/wazuh-alerts-4.x-*/_search",
+                timeout=(5, 15),
+                json={
+                    "size": 1,
+                    "query": {
+                        "bool": {
+                            "must": [
+                                {"term": {"data.source": "firewalla-msp"}},
+                                {"term": {"data.event_type": event_type}}
+                            ]
+                        }
+                    },
+                    "sort": [{"@timestamp": "desc"}],
+                    "_source": ["@timestamp"]
+                }
+            )
+            response.raise_for_status()
+            hits = response.json().get("hits", {}).get("hits", [])
+            if not hits:
+                return None
+            ts_str = hits[0]["_source"].get("@timestamp")
+            if not ts_str:
+                return None
+            return dateparser.parse(ts_str).astimezone(timezone.utc).timestamp()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code in (401, 403):
+                logger.error(f"IndexerClient: OpenSearch auth failed for {event_type} (check INDEXER credentials): {e}")
+            else:
+                logger.warning(f"IndexerClient: OpenSearch HTTP error for {event_type}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"IndexerClient: failed to query OpenSearch for {event_type}: {e}")
+            return None
 
 
 class StateManager:
