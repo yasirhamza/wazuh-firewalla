@@ -12,6 +12,7 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urlparse
 
 import requests
 
@@ -34,7 +35,18 @@ FEEDS = {
         "url": "https://threatfox.abuse.ch/export/csv/ip-port/recent/",
         "description": "ThreatFox Recent C2 IPs (broad malware coverage)",
         "parser": "parse_threatfox_ips"
-    }
+    },
+    "urlhaus-domains": {
+        "url": "https://urlhaus.abuse.ch/downloads/csv/",
+        "description": "URLhaus Malware URL Hostnames (malware download sites)",
+        "parser": "parse_urlhaus_domains",
+        "downloader": "download_urlhaus_csv"
+    },
+    "malwarebazaar-hashes": {
+        "url": "https://bazaar.abuse.ch/export/csv/recent/",
+        "description": "MalwareBazaar Recent SHA256 Hashes (CSV export)",
+        "parser": "parse_malwarebazaar_hashes"
+    },
 }
 
 # Setup logging
@@ -139,6 +151,21 @@ class StatusReporter:
         logger.info(f"Rotated status log {self.status_file}")
 
 
+def parse_sslbl_ips(content: str) -> list:
+    """Parse SSLBL IP blacklist CSV"""
+    entries = []
+    for line in content.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(",")
+        if len(parts) >= 2:
+            ip = parts[1].strip()
+            if ip and not ip.startswith("DstIP"):
+                entries.append((ip, "sslbl-c2"))
+    return entries
+
+
 def parse_feodo_ips(content: str) -> list:
     """Parse Feodo Tracker IP blocklist CSV"""
     entries = []
@@ -176,10 +203,76 @@ def parse_threatfox_ips(content: str) -> list:
     return entries
 
 
-def download_feed(url: str, timeout: int = 30) -> str:
-    """Download feed content"""
+def parse_urlhaus_domains(content: str) -> list:
+    """Parse URLhaus URL blocklist CSV, extracting unique hostnames"""
+    entries = []
+    for line in content.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Format: "id","dateadded","url","url_status","last_online","threat","tags","urlhaus_link","reporter"
+        parts = line.split(",")
+        if len(parts) < 3:
+            continue
+        url = parts[2].strip().strip('"')
+        if not url or url == "url":
+            continue
+        try:
+            hostname = urlparse(url).hostname
+        except Exception:
+            continue
+        if not hostname:
+            continue
+        # Skip pure IPs — already covered by feodo/threatfox IP feeds
+        if all(c.isdigit() or c == "." for c in hostname) or ":" in hostname:
+            continue
+        entries.append((hostname, "urlhaus-malware"))
+    return entries
+
+
+def parse_malwarebazaar_hashes(content: str) -> list:
+    """Parse MalwareBazaar recent CSV export, extracting SHA256 hashes"""
+    entries = []
+    for line in content.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(",")
+        if len(parts) < 9:
+            continue
+        sha256 = parts[1].strip().strip('"').lower()
+        if not sha256 or len(sha256) != 64:
+            continue
+        family = parts[8].strip().strip('"').replace(" ", "_")
+        if not family or family.lower() == "n/a":
+            family = "unknown"
+        entries.append((sha256, family))
+    return entries
+
+
+def download_urlhaus_csv(url: str, timeout: int = 30) -> str:
+    """Download URLhaus ZIP feed and extract the inner CSV text"""
+    import io
+    import zipfile
     try:
         response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+            # The archive contains a single file (csv.txt)
+            csv_filename = zf.namelist()[0]
+            return zf.read(csv_filename).decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.error(f"Failed to download/extract URLhaus ZIP from {url}: {e}")
+        return ""
+
+
+def download_feed(url: str, timeout: int = 30, post_data: dict = None) -> str:
+    """Download feed content via GET or POST"""
+    try:
+        if post_data:
+            response = requests.post(url, data=post_data, timeout=timeout)
+        else:
+            response = requests.get(url, timeout=timeout)
         response.raise_for_status()
         return response.text
     except requests.RequestException as e:
@@ -213,7 +306,17 @@ def update_feeds(status: StatusReporter = None):
     for name, config in FEEDS.items():
         logger.info(f"Updating {name} ({config['description']})...")
 
-        content = download_feed(config["url"])
+        downloader_name = config.get("downloader")
+        if downloader_name:
+            downloader = globals().get(downloader_name)
+            if not downloader:
+                logger.error(f"Downloader function '{downloader_name}' not found for feed '{name}'")
+                if status:
+                    status.report_error(name, f"Downloader function '{downloader_name}' not found")
+                continue
+            content = downloader(config["url"])
+        else:
+            content = download_feed(config["url"], post_data=config.get("post_data"))
         if not content:
             logger.warning(f"Skipping {name} - download failed")
             if status:
