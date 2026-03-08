@@ -193,7 +193,7 @@
     <group>firewalla_flow,threat_intel,c2,</group>
   </rule>
 
-  <rule id="100452" level="12">
+  <rule id="100452" level="7">
     <if_sid>100400</if_sid>
     <list field="url" lookup="match_key">etc/lists/threat-intel/urlhaus-domains</list>
     <description>Firewalla: Connection to URLhaus malware-hosting domain - $(srcuser) to $(url)</description>
