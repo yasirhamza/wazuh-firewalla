@@ -76,3 +76,32 @@ class WazuhDataService:
             "total_matched": total,
             "truncated": total > len(rows),
         }
+
+    def aggregate_alerts(
+        self,
+        group_by_field: str,
+        time_range: str,
+        filters: dict[str, Any] | None = None,
+        top_n: int = 10,
+    ) -> dict[str, Any]:
+        size = min(top_n, 50)  # hard cap on bucket count
+        body = {
+            "size": 0,
+            "query": {
+                "bool": {"filter": self._build_filter_clauses(filters, time_range)}
+            },
+            "aggs": {
+                "by_field": {"terms": {"field": group_by_field, "size": size}}
+            },
+            "track_total_hits": True,
+        }
+        resp = self._client.search(index=self._alerts_index, body=body)
+        buckets = [
+            {"key": b["key"], "count": b["doc_count"]}
+            for b in resp["aggregations"]["by_field"]["buckets"]
+        ]
+        return {
+            "buckets": buckets,
+            "total_in_scope": resp["hits"]["total"]["value"],
+            "time_range": time_range,
+        }
