@@ -590,3 +590,61 @@ class WazuhDataService:
             "new_domains": new_domains[:top_n],
             "truncated": len(new_domains) > top_n,
         }
+
+    def enumerate_devices(
+        self,
+        time_range: str = "last_30d",
+        top_n: int = 500,
+    ) -> list[str]:
+        """Unique `data.device.name` values seen in alarm events across
+        `time_range`. Used by scheduled first-seen scans to decide which
+        devices to analyze. Returns sorted list.
+        """
+        body = {
+            "size": 0,
+            "query": {"bool": {"filter": [
+                self._time_filter(time_range),
+                {"term": {"data.event_type": "alarm"}},
+                {"exists": {"field": "data.device.name"}},
+            ]}},
+            "aggs": {"devices": {"terms": {
+                "field": "data.device.name",
+                "size": top_n,
+            }}},
+        }
+        resp = self._client.search(index=self._alerts_index, body=body)
+        return sorted(
+            b["key"] for b in resp["aggregations"]["devices"]["buckets"]
+        )
+
+    def scan_first_seen_for_all_devices(
+        self,
+        recent_window: str = "last_7d",
+        baseline_days: int = 90,
+        device_lookback: str = "last_30d",
+        max_new_domains_per_device: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Run first_seen_domains for each device seen in `device_lookback`.
+
+        Returns one record per device. Robust to per-device failures: if
+        one device lookup raises, the others still complete and the failure
+        is recorded in the result with an `error` field.
+        """
+        devices = self.enumerate_devices(time_range=device_lookback)
+        results: list[dict[str, Any]] = []
+        for device in devices:
+            try:
+                report = self.first_seen_domains(
+                    device_name=device,
+                    recent_window=recent_window,
+                    baseline_days=baseline_days,
+                    top_n=max_new_domains_per_device,
+                )
+            except Exception as e:
+                results.append({
+                    "device": device,
+                    "error": f"{type(e).__name__}: {e}",
+                })
+                continue
+            results.append(report)
+        return results

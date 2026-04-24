@@ -114,6 +114,46 @@ class HeartbeatWriter:
             "error_message": message,
         })
 
+    def record_first_seen(self, report: dict[str, Any]) -> None:
+        """Append a first-seen-domains scan result for one device.
+
+        Uses the shared sidecar-status stream (event_type=sidecar_status,
+        job_type=first_seen_report) so it chains off the existing base rule
+        100500. The per-device payload is promoted to top-level fields so a
+        Wazuh rule (100720) can match on them and the dashboard panel can
+        aggregate on `device` / `new_domain_count`.
+
+        Note: sync_status is deliberately 'reported' (not 'success') so
+        rule 100501 ('successful sync job' — matches sync_status=success)
+        doesn't accidentally fire on these events, which would shadow rule
+        100720 at equal level.
+        """
+        now = time.time()
+        # Nest the device name under data.device.{name} to match the
+        # existing index mapping that msp-poller alarms already use — a
+        # scalar `data.device` would clash with that object mapping and
+        # get silently dropped by Elasticsearch with a
+        # mapper_parsing_exception.
+        event = {
+            "timestamp": _iso(now),
+            "event_type": "sidecar_status",
+            "source": "sidecar-status",
+            "sidecar": self._sidecar,
+            "job_type": "first_seen_report",
+            "sync_status": "reported",
+            "device": {"name": report.get("device")},
+            "recent_window": report.get("recent_window"),
+            "baseline_days": report.get("baseline_days"),
+            "recent_unique_domains": report.get("recent_unique_domains"),
+            "baseline_unique_domains": report.get("baseline_unique_domains"),
+            "new_domain_count": report.get("new_domain_count"),
+            "new_domains": report.get("new_domains"),
+        }
+        if "error" in report:
+            event["sync_status"] = "error"
+            event["error_message"] = report["error"]
+        self._append_event(event)
+
     # ---------- internals ----------
     def _prune_locked(self) -> None:
         cutoff = time.time() - 600  # 10 min

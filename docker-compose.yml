@@ -179,6 +179,40 @@ services:
       wazuh.manager:
         condition: service_healthy
 
+  # First-seen-domain scanner. Batch job, no LLM dependency, no HTTP.
+  # Shares the wazuh-mcp image (same service-layer code) but runs a
+  # dedicated entrypoint (first_seen_runner) so failures in one don't
+  # affect the other. Not needed by the dashboard panel, which reads
+  # the events this sidecar writes to the shared sidecar-status stream.
+  first-seen-scanner:
+    build: ./mcp-server
+    image: single-node-wazuh-mcp
+    container_name: single-node-first-seen-scanner
+    hostname: first-seen-scanner
+    restart: unless-stopped
+    command: ["python", "-u", "-m", "src.first_seen_runner"]
+    environment:
+      # Reuses mcp_read since its access pattern is the same (read-only
+      # over wazuh-alerts-*). MCP_API_KEY unused but required by the
+      # shared config loader; any string works.
+      - MCP_OS_USER=${MCP_OS_USER}
+      - MCP_OS_PASSWORD=${MCP_OS_PASSWORD}
+      - MCP_API_KEY=unused-by-scanner
+      - OPENSEARCH_URL=https://wazuh.indexer:9200
+      - MAX_LOG_SIZE=${MAX_LOG_SIZE:-10485760}
+      - MAX_LOG_BACKUPS=${MAX_LOG_BACKUPS:-2}
+      - FIRST_SEEN_SCAN_INTERVAL_SEC=${FIRST_SEEN_SCAN_INTERVAL_SEC:-86400}
+      - FIRST_SEEN_RECENT_WINDOW=${FIRST_SEEN_RECENT_WINDOW:-last_7d}
+      - FIRST_SEEN_BASELINE_DAYS=${FIRST_SEEN_BASELINE_DAYS:-90}
+      - FIRST_SEEN_ENABLED=${FIRST_SEEN_ENABLED:-true}
+    volumes:
+      - sidecar_status:/var/ossec/logs/sidecar-status
+    depends_on:
+      wazuh.indexer:
+        condition: service_started
+      wazuh.manager:
+        condition: service_healthy
+
 volumes:
   wazuh_api_configuration:
   wazuh_etc:

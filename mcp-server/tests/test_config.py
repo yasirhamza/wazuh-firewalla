@@ -33,6 +33,10 @@ def test_load_settings_defaults(monkeypatch):
     assert settings.max_log_backups == 2
     assert settings.rate_limit_per_min == 60
     assert settings.rate_limit_burst == 10
+    assert settings.first_seen_scan_interval_sec == 86400
+    assert settings.first_seen_recent_window == "last_7d"
+    assert settings.first_seen_baseline_days == 90
+    assert settings.first_seen_enabled is True
 
 
 def test_load_settings_missing_required(monkeypatch):

@@ -254,4 +254,29 @@
     <group>sidecar_status,sidecar_error,</group>
   </rule>
 
+  <!-- ========== FIRST-SEEN-DOMAIN REPORT RULES ========== -->
+  <!-- IDs 100720-100729 reserved for first-seen reports.
+       (100700-100719 are reserved for noise suppression in
+       windows_srp_rules.xml — don't reuse.) -->
+
+  <!-- Base: per-device first-seen-domains scan result (one event per device
+       per scan cycle). Level 3 by default — the panel aggregates these for
+       trend visibility. Goes higher in 100721 when lots of new domains
+       appear for one device. -->
+  <rule id="100720" level="3">
+    <if_sid>100500</if_sid>
+    <field name="job_type">^first_seen_report$</field>
+    <description>First-seen scan: $(device.name) - $(new_domain_count) new domains</description>
+    <group>sidecar_status,first_seen_report,</group>
+  </rule>
+
+  <!-- Surge: a device with 10+ new domains in one week is worth looking at
+       (either legitimate new app install or sudden behavior change). -->
+  <rule id="100721" level="7">
+    <if_sid>100720</if_sid>
+    <field name="new_domain_count" type="pcre2">^(1[0-9]|[2-9][0-9]|[1-9][0-9]{2,})$</field>
+    <description>First-seen scan: $(device.name) surge - $(new_domain_count) new domains this week</description>
+    <group>sidecar_status,first_seen_report,first_seen_surge,</group>
+  </rule>
+
 </group>
