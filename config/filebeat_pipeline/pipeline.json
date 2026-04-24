@@ -103,6 +103,43 @@
       }
     },
     {
+      "convert": {
+        "description": "Cast first-seen-report numeric fields to long. Wazuh stringifies nested JSON values, so without this the Sum/Avg aggregations reject the field.",
+        "if": "ctx.rule?.id == '100720'",
+        "field": "data.new_domain_count",
+        "type": "long",
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    },
+    {
+      "convert": {
+        "if": "ctx.rule?.id == '100720'",
+        "field": "data.baseline_days",
+        "type": "long",
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    },
+    {
+      "convert": {
+        "if": "ctx.rule?.id == '100720'",
+        "field": "data.recent_unique_domains",
+        "type": "long",
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    },
+    {
+      "convert": {
+        "if": "ctx.rule?.id == '100720'",
+        "field": "data.baseline_unique_domains",
+        "type": "long",
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    },
+    {
       "date": {
         "field": "timestamp",
         "target_field": "@timestamp",
