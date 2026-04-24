@@ -105,3 +105,75 @@ class WazuhDataService:
             "total_in_scope": resp["hits"]["total"]["value"],
             "time_range": time_range,
         }
+
+    def alert_overview(self, time_range: str) -> dict[str, Any]:
+        # NOTE: `data.source` is populated by our sidecars (firewalla-msp,
+        # windows-srp, threat-intel) but NOT by native OSSEC/syscheck rules.
+        # We pair it with a rule-groups breakdown so OSSEC/syscheck events
+        # remain visible even though they fall into the "unknown" source bucket.
+        body = {
+            "size": 0,
+            "query": {
+                "bool": {"filter": self._build_filter_clauses(None, time_range)}
+            },
+            "aggs": {
+                "by_source": {
+                    "terms": {"field": "data.source", "size": 10, "missing": "unknown"}
+                },
+                "by_severity": {
+                    "range": {
+                        "field": "rule.level",
+                        "ranges": [
+                            {"key": "low", "from": 0, "to": 4},
+                            {"key": "medium", "from": 4, "to": 8},
+                            {"key": "high", "from": 8, "to": 16},
+                        ],
+                    }
+                },
+                "top_rule_groups": {"terms": {"field": "rule.groups", "size": 10}},
+                "top_agents": {"terms": {"field": "agent.name", "size": 10}},
+                "top_src_ips": {"terms": {"field": "data.srcip", "size": 10}},
+                "top_dst_ips": {"terms": {"field": "data.dstip", "size": 10}},
+                "threat_intel_hits": {
+                    "filter": {
+                        "bool": {
+                            "should": [
+                                {"terms": {"rule.id": ["100450", "100451", "100452", "100453"]}},
+                                {"range": {"rule.id": {"gte": "99901", "lte": "99999"}}},
+                            ]
+                        }
+                    }
+                },
+            },
+            "track_total_hits": True,
+        }
+        resp = self._client.search(index=self._alerts_index, body=body)
+        aggs = resp["aggregations"]
+
+        severity_keymap = {"low": "low (0-3)", "medium": "medium (4-7)", "high": "high (8-12)"}
+        return {
+            "total_alerts": resp["hits"]["total"]["value"],
+            "by_source": {b["key"]: b["doc_count"] for b in aggs["by_source"]["buckets"]},
+            "by_severity": {
+                severity_keymap[b["key"]]: b["doc_count"]
+                for b in aggs["by_severity"]["buckets"]
+            },
+            "top_rule_groups": [
+                {"key": b["key"], "count": b["doc_count"]}
+                for b in aggs["top_rule_groups"]["buckets"]
+            ],
+            "top_agents": [
+                {"key": b["key"], "count": b["doc_count"]}
+                for b in aggs["top_agents"]["buckets"]
+            ],
+            "top_src_ips": [
+                {"key": b["key"], "count": b["doc_count"]}
+                for b in aggs["top_src_ips"]["buckets"]
+            ],
+            "top_dst_ips": [
+                {"key": b["key"], "count": b["doc_count"]}
+                for b in aggs["top_dst_ips"]["buckets"]
+            ],
+            "threat_intel_hits": aggs["threat_intel_hits"]["doc_count"],
+            "time_range": time_range,
+        }
