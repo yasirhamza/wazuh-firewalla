@@ -25,6 +25,14 @@ STATUS_DIR = Path(os.environ.get("STATUS_DIR", "/status"))
 MAX_LOG_SIZE = int(os.environ.get("MAX_LOG_SIZE", 10 * 1024 * 1024))  # 10MB for status logs
 
 # Feed definitions: name -> (url, parser_function)
+#
+# DISABLED: urlhaus-domains. 30-day analysis showed 5,612 matches, 100% of
+# which were false positives against shared cloud/CDN infrastructure
+# (Azure, GitHub Pages, Fastly, Cloudflare) that URLhaus listed because
+# some past malware sample transited the same shared endpoint. For a
+# home/SMB environment this feed produces only noise; it masks real
+# signal from the other three feeds. Parser and downloader kept below
+# in case the feed is re-enabled (e.g., paired with a CDN/ASN allow-list).
 FEEDS = {
     "feodo-ips": {
         "url": "https://feodotracker.abuse.ch/downloads/ipblocklist.csv",
@@ -35,12 +43,6 @@ FEEDS = {
         "url": "https://threatfox.abuse.ch/export/csv/ip-port/recent/",
         "description": "ThreatFox Recent C2 IPs (broad malware coverage)",
         "parser": "parse_threatfox_ips"
-    },
-    "urlhaus-domains": {
-        "url": "https://urlhaus.abuse.ch/downloads/csv/",
-        "description": "URLhaus Malware URL Hostnames (malware download sites)",
-        "parser": "parse_urlhaus_domains",
-        "downloader": "download_urlhaus_csv"
     },
     "malwarebazaar-hashes": {
         "url": "https://bazaar.abuse.ch/export/csv/recent/",
