@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Patch the Firewalla Security Dashboard NDJSON in-place.
 
-Applies two specific changes recommended by the dashboard-analysis work:
+Applies three specific changes from the dashboard-analysis work:
 
 1. REMOVE the "Firewalla: Threat Intel Matches" panel. Individual-IOC
    tables are low-signal once the network has category-level policy
    coverage — the underlying IOCs decay faster than the table refreshes.
-2. ADD a "Firewalla: ALARM_INTEL rate by device" timeseries panel. That's
-   the durable signal — per-device rate of Firewalla's own intel classifier
-   firing (rule.id:100212). A device whose rate jumps week-over-week has
-   almost certainly picked up a new app/SDK with shady ad-tech or worse.
+2. ADD "Firewalla: ALARM_INTEL rate by device" timeseries — per-device
+   rate of Firewalla's own intel classifier (rule.id:100212). A device
+   whose rate jumps week-over-week has almost certainly picked up a new
+   app/SDK with shady ad-tech.
+3. ADD "First-seen domains per device" timeseries — sum of
+   data.new_domain_count from the first-seen-scanner's scheduled reports
+   (rule.id:100720). Complements #2: IOC-rate tracks "did it hit known
+   bad stuff", first-seen tracks "did it start talking to NEW stuff at
+   all". Together they catch both known-threat and novel-behavior shifts.
 
 Idempotent: running twice is safe. Existing state is detected.
 
@@ -35,9 +40,12 @@ DEFAULT_PATH = REPO_ROOT / "dashboards" / "firewalla-dashboard.ndjson"
 REMOVE_VIZ_ID = "firewalla-threat-intel-table"
 REMOVE_VIZ_TITLE = "Firewalla: Threat Intel Matches"
 
-# Panel we're adding.
+# Panels we're adding.
 ADD_VIZ_ID = "firewalla-alarm-intel-rate"
 ADD_VIZ_TITLE = "Firewalla: ALARM_INTEL rate by device"
+
+FIRST_SEEN_VIZ_ID = "firewalla-first-seen-domains"
+FIRST_SEEN_VIZ_TITLE = "First-seen domains per device"
 
 DASHBOARD_ID = "firewalla-security-dashboard"
 INDEX_PATTERN_ID = "wazuh-alerts-*"
@@ -171,6 +179,146 @@ def _alarm_intel_rate_viz() -> dict:
     }
 
 
+def _first_seen_by_device_viz() -> dict:
+    """Stacked-histogram timeseries: sum of new_domain_count per device.
+
+    Source events: rule 100720 ("First-seen scan") emitted once per device
+    per scan cycle by the first-seen-scanner sidecar. Each event carries
+    `data.new_domain_count` (number of domains this device contacted in
+    the recent window that were NOT seen in the 90-day baseline).
+
+    Metric is SUM (not count) because each scan produces exactly one event
+    per device — summing new_domain_count aggregates the actual signal.
+    """
+    vis_state = {
+        "title": FIRST_SEEN_VIZ_TITLE,
+        "type": "histogram",
+        "aggs": [
+            # SUM of new_domain_count per bucket, not count-of-events.
+            {
+                "id": "1",
+                "enabled": True,
+                "type": "sum",
+                "params": {"field": "data.new_domain_count"},
+                "schema": "metric",
+            },
+            {
+                "id": "2",
+                "enabled": True,
+                "type": "date_histogram",
+                "params": {
+                    "field": "timestamp",
+                    "timeRange": {"from": "now-30d", "to": "now"},
+                    "useNormalizedOpenSearchInterval": True,
+                    "scaleMetricValues": False,
+                    "interval": "auto",
+                    "drop_partials": False,
+                    "min_doc_count": 1,
+                    "extended_bounds": {},
+                },
+                "schema": "segment",
+            },
+            {
+                "id": "3",
+                "enabled": True,
+                "type": "terms",
+                "params": {
+                    "field": "data.device.name",
+                    "orderBy": "1",
+                    "order": "desc",
+                    "size": 15,
+                    "otherBucket": False,
+                    "otherBucketLabel": "Other",
+                    "missingBucket": False,
+                    "missingBucketLabel": "Missing",
+                },
+                "schema": "group",
+            },
+        ],
+        "params": {
+            "type": "histogram",
+            "grid": {"categoryLines": False},
+            "categoryAxes": [{
+                "id": "CategoryAxis-1",
+                "type": "category",
+                "position": "bottom",
+                "show": True,
+                "style": {},
+                "scale": {"type": "linear"},
+                "labels": {"show": True, "filter": True, "truncate": 100},
+                "title": {},
+            }],
+            "valueAxes": [{
+                "id": "ValueAxis-1",
+                "name": "LeftAxis-1",
+                "type": "value",
+                "position": "left",
+                "show": True,
+                "style": {},
+                "scale": {"type": "linear", "mode": "normal"},
+                "labels": {"show": True, "rotate": 0, "filter": False, "truncate": 100},
+                "title": {"text": "New domains"},
+            }],
+            "seriesParams": [{
+                "show": True,
+                "type": "histogram",
+                "mode": "stacked",
+                "data": {"label": "New domain count", "id": "1"},
+                "valueAxis": "ValueAxis-1",
+                "drawLinesBetweenPoints": True,
+                "lineWidth": 2,
+                "showCircles": True,
+            }],
+            "addTooltip": True,
+            "addLegend": True,
+            "legendPosition": "right",
+            "times": [],
+            "addTimeMarker": False,
+            "labels": {"show": False},
+            "thresholdLine": {
+                "show": False, "value": 10, "width": 1, "style": "full", "color": "#E7664C",
+            },
+        },
+    }
+
+    search_source = {
+        # Filter to rule 100720 (first-seen-scanner base rule) — the
+        # scheduled scan report events. Each has data.new_domain_count and
+        # data.device.name populated by record_first_seen().
+        "query": {"query": "rule.id: \"100720\"", "language": "kuery"},
+        "filter": [],
+        "indexRefName": "kibanaSavedObjectMeta.searchSourceJSON.index",
+    }
+
+    return {
+        "attributes": {
+            "description": (
+                "Per-device count of brand-new domains contacted each scan "
+                "cycle — domains the device touched in the recent 7-day "
+                "window that were NOT in its 90-day baseline. A spike for "
+                "one device = 'a new app or SDK started reaching out'. "
+                "Source: rule 100720, emitted daily by the "
+                "first-seen-scanner sidecar."
+            ),
+            "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps(search_source)},
+            "title": FIRST_SEEN_VIZ_TITLE,
+            "uiStateJSON": "{}",
+            "version": 1,
+            "visState": json.dumps(vis_state),
+        },
+        "id": FIRST_SEEN_VIZ_ID,
+        "migrationVersion": {"visualization": "7.10.0"},
+        "references": [{
+            "id": INDEX_PATTERN_ID,
+            "name": "kibanaSavedObjectMeta.searchSourceJSON.index",
+            "type": "index-pattern",
+        }],
+        "type": "visualization",
+        "updated_at": "2026-04-24T00:00:00.000Z",
+        "version": "1",
+    }
+
+
 def _load(path: Path) -> list[dict]:
     with path.open() as f:
         return [json.loads(line) for line in f if line.strip()]
@@ -287,23 +435,26 @@ def main() -> int:
     original = copy.deepcopy(objs)
 
     objs, removed = _remove_viz_and_panel(objs, REMOVE_VIZ_ID)
-    objs, added = _add_viz_and_panel(objs, _alarm_intel_rate_viz(), DASHBOARD_ID)
+    objs, added_intel = _add_viz_and_panel(objs, _alarm_intel_rate_viz(), DASHBOARD_ID)
+    objs, added_firstseen = _add_viz_and_panel(objs, _first_seen_by_device_viz(), DASHBOARD_ID)
 
-    if not removed and not added:
+    if not removed and not added_intel and not added_firstseen:
         print("already patched — no changes needed.")
         return 0
 
     print("Changes:")
     if removed:
-        print(f"  - REMOVED visualization '{REMOVE_VIZ_TITLE}' ({REMOVE_VIZ_ID}) "
-              f"and its dashboard panel.")
+        print(f"  - REMOVED '{REMOVE_VIZ_TITLE}' ({REMOVE_VIZ_ID}).")
     else:
         print(f"  - already absent: '{REMOVE_VIZ_TITLE}'")
-    if added:
-        print(f"  + ADDED visualization '{ADD_VIZ_TITLE}' ({ADD_VIZ_ID}) "
-              f"as new panel at the bottom of '{DASHBOARD_ID}'.")
+    if added_intel:
+        print(f"  + ADDED '{ADD_VIZ_TITLE}' ({ADD_VIZ_ID}).")
     else:
         print(f"  + already present: '{ADD_VIZ_TITLE}'")
+    if added_firstseen:
+        print(f"  + ADDED '{FIRST_SEEN_VIZ_TITLE}' ({FIRST_SEEN_VIZ_ID}).")
+    else:
+        print(f"  + already present: '{FIRST_SEEN_VIZ_TITLE}'")
 
     # Confidence check: every reference in the dashboard should resolve to
     # an object we still have (or to the wazuh-alerts-* index pattern).
