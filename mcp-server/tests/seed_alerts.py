@@ -56,8 +56,53 @@ def _gen(n: int = 500) -> Iterator[dict]:
         yield {"_index": f"wazuh-alerts-4.x-{ts.strftime('%Y.%m.%d')}", "_source": doc}
 
 
+# Minimal index template. Mirrors the `keyword` mapping for the fields our
+# tools query/aggregate on — the real Wazuh template is far broader, but this
+# covers everything the integration tests exercise. Without it, the ephemeral
+# cluster auto-maps strings as `text` and aggregations/term-queries fail.
+_TEST_TEMPLATE = {
+    "index_patterns": ["wazuh-alerts-*"],
+    "template": {
+        "mappings": {
+            "properties": {
+                "@timestamp": {"type": "date"},
+                "timestamp": {"type": "date"},
+                "agent": {"properties": {
+                    "id": {"type": "keyword"},
+                    "name": {"type": "keyword"},
+                    "ip": {"type": "keyword"},
+                }},
+                "rule": {"properties": {
+                    "id": {"type": "keyword"},
+                    "level": {"type": "integer"},
+                    "description": {"type": "keyword"},
+                    "groups": {"type": "keyword"},
+                }},
+                "data": {"properties": {
+                    "source": {"type": "keyword"},
+                    "srcip": {"type": "keyword"},
+                    "dstip": {"type": "keyword"},
+                    "domain": {"type": "keyword"},
+                    "srp": {"properties": {
+                        "action": {"type": "keyword"},
+                        "target_path": {"type": "keyword"},
+                        "user": {"type": "keyword"},
+                    }},
+                    "threat_intel": {"properties": {
+                        "list": {"type": "keyword"},
+                        "ioc": {"type": "keyword"},
+                    }},
+                }},
+            }
+        }
+    },
+}
+
+
 def seed(os_url: str = "http://localhost:19200", count: int = 500) -> None:
     os_ = OpenSearch(hosts=[os_url])
+    # Put template BEFORE writing so mappings apply at index creation.
+    os_.indices.put_index_template(name="wazuh-alerts-test", body=_TEST_TEMPLATE)
     os_.indices.delete(index="wazuh-alerts-*", ignore=[400, 404])
     helpers.bulk(os_, _gen(count), refresh=True)
     print(f"seeded {count} alerts into {os_url}")
