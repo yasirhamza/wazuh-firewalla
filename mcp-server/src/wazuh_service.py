@@ -419,3 +419,72 @@ class WazuhDataService:
         if not hits:
             raise AlertNotFound(alert_id)
         return {"_id": hits[0]["_id"], **hits[0]["_source"]}
+
+    _ENTITY_FIELDS: dict[str, list[str]] = {
+        "ip": ["data.srcip", "data.dstip"],
+        "agent": ["agent.name", "agent.id"],
+        "device": ["data.device.name", "data.device.mac", "agent.ip"],
+        "user": ["data.srp.user", "data.win.eventdata.user"],
+        "process": ["data.srp.target_path", "data.win.eventdata.image"],
+        "hash": ["syscheck.sha256_after", "syscheck.md5_after", "data.win.eventdata.hashes"],
+        "domain": ["data.domain", "dns.question.name"],
+    }
+
+    def entity_activity(
+        self,
+        entity_type: str,
+        entity_value: str,
+        time_range: str,
+        top_n: int = 10,
+    ) -> dict[str, Any]:
+        fields = self._ENTITY_FIELDS.get(entity_type)
+        if not fields:
+            raise ValueError(
+                f"unknown entity_type: {entity_type!r}. Expected one of {list(self._ENTITY_FIELDS)}"
+            )
+        size_n = min(top_n, 50)
+        body = {
+            "size": 5,  # most recent samples
+            "sort": [{"@timestamp": "desc"}],
+            "query": {
+                "bool": {
+                    "must": [{
+                        "bool": {"should": [{"term": {f: entity_value}} for f in fields], "minimum_should_match": 1}
+                    }],
+                    "filter": self._build_filter_clauses(None, time_range),
+                }
+            },
+            "aggs": {
+                "by_source": {"terms": {"field": "data.source", "size": size_n}},
+                "by_rule": {"terms": {"field": "rule.id", "size": size_n}},
+                "related_agents": {"terms": {"field": "agent.name", "size": size_n}},
+                "first_seen": {"min": {"field": "@timestamp"}},
+                "last_seen": {"max": {"field": "@timestamp"}},
+            },
+            "track_total_hits": True,
+        }
+        resp = self._client.search(index=self._alerts_index, body=body)
+        aggs = resp["aggregations"]
+        return {
+            "entity": {"type": entity_type, "value": entity_value},
+            "total_alerts": resp["hits"]["total"]["value"],
+            "by_source": {b["key"]: b["doc_count"] for b in aggs["by_source"]["buckets"]},
+            "by_rule": [
+                {"rule_id": b["key"], "count": b["doc_count"]}
+                for b in aggs["by_rule"]["buckets"]
+            ],
+            "first_seen": aggs["first_seen"].get("value_as_string"),
+            "last_seen": aggs["last_seen"].get("value_as_string"),
+            "related_agents": [
+                {"name": b["key"], "count": b["doc_count"]}
+                for b in aggs["related_agents"]["buckets"]
+            ],
+            "sample_alerts": [
+                {
+                    "id": h["_id"],
+                    "@timestamp": h["_source"].get("@timestamp"),
+                    "rule": h["_source"].get("rule", {}),
+                }
+                for h in resp["hits"]["hits"]
+            ],
+        }
