@@ -255,3 +255,26 @@
   </rule>
 
 </group>
+
+<!--
+  ========== WINDOWS NOISE SUPPRESSION ==========
+  Rule IDs: 100700-100799
+  Lower the level of built-in Wazuh rules to 0 when they fire on
+  well-understood benign Windows events, so they still index but
+  don't generate alerts. Start narrow — suppress by specific
+  event-data pattern, not by rule-id alone.
+-->
+<group name="windows,noise-suppression,">
+
+  <!-- DCOM timeout activating Game DVR's AppCaptureShell.
+       Chain: Windows System error (18101) → Multiple System error events (61110).
+       The event is triggered by Windows itself, not by malware or a user action;
+       seeing dozens per day from one Windows endpoint is expected background noise. -->
+  <rule id="100700" level="0">
+    <if_sid>61110</if_sid>
+    <field name="win.eventdata.param1">^Windows\.Media\.Capture\.Internal\.AppCaptureShell$</field>
+    <description>Suppressed: DCOM AppCaptureShell timeout (Windows Game DVR noise)</description>
+    <group>noise_suppressed,</group>
+  </rule>
+
+</group>
