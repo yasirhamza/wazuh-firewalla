@@ -40,8 +40,10 @@ COMMON_FIELDS_DESC = (
 
 
 def startup_self_check(client, alerts_index: str) -> None:
-    if not client.ping():
-        raise RuntimeError("OpenSearch ping failed at startup")
+    # A successful count subsumes connectivity — and the `mcp_read` OpenSearch
+    # role is scoped to `wazuh-alerts-*`, so the cluster-level HEAD / that
+    # `client.ping()` uses is forbidden by design. Count is the real capability
+    # check anyway.
     try:
         client.count(index=alerts_index, body={"query": {"match_all": {}}})
     except Exception as e:

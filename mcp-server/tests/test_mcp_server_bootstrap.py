@@ -12,17 +12,16 @@ from src.wazuh_client import WazuhClientError
 from src.wazuh_service import AlertNotFound
 
 
-def test_startup_self_check_succeeds_when_ping_and_query_pass():
+def test_startup_self_check_succeeds_when_count_works():
     client = MagicMock()
-    client.ping.return_value = True
     client.count.return_value = 0
     startup_self_check(client, alerts_index="wazuh-alerts-*")  # no raise
 
 
-def test_startup_self_check_fails_on_ping_false():
+def test_startup_self_check_fails_when_count_raises():
     client = MagicMock()
-    client.ping.return_value = False
-    with pytest.raises(RuntimeError, match="ping"):
+    client.count.side_effect = RuntimeError("network down")
+    with pytest.raises(RuntimeError, match="self-check failed"):
         startup_self_check(client, alerts_index="wazuh-alerts-*")
 
 
