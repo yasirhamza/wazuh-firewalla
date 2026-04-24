@@ -1,0 +1,5 @@
+mcp>=1.2.0,<2  # upper bound: tests touch private _tool_manager API
+opensearch-py>=2.6.0
+python-dotenv>=1.0.0
+pydantic>=2.7.0
+uvicorn>=0.30.0
