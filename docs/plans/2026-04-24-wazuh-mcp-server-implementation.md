@@ -382,6 +382,28 @@ def test_search_raises_after_retry_exhausted():
     assert mock_os.search.call_count == 2
 
 
+def test_search_raises_timeout_when_deadline_exceeded(monkeypatch):
+    """If a retry push the total wall-clock past the deadline, raise 'timeout'."""
+    client, mock_os = make_client()
+    from opensearchpy import ConnectionError
+
+    # Fake monotonic: first call at t=0, deadline is +10; after first attempt
+    # fails we jump past the deadline.
+    t = [0.0]
+    monkeypatch.setattr("src.wazuh_client.time.monotonic", lambda: t[0])
+
+    def fail_and_advance(*a, **kw):
+        t[0] += 11.0
+        raise ConnectionError("slow")
+
+    mock_os.search.side_effect = fail_and_advance
+    with pytest.raises(WazuhClientError, match="timeout"):
+        client.search(index="wazuh-alerts-*", body={})
+    # Only one attempt should have happened — the retry is skipped when the
+    # deadline has already passed.
+    assert mock_os.search.call_count == 1
+
+
 def test_count_delegates_to_opensearch():
     client, mock_os = make_client()
     mock_os.count.return_value = {"count": 42}
@@ -414,7 +436,7 @@ Expected: ImportError for `src.wazuh_client`.
 Create `mcp-server/src/wazuh_client.py`:
 
 ```python
-"""Thin OpenSearch client wrapper with one retry + timeout."""
+"""Thin OpenSearch client wrapper with one retry + wall-clock deadline."""
 import logging
 import time
 from typing import Any
@@ -422,6 +444,13 @@ from typing import Any
 from opensearchpy import OpenSearch, ConnectionError as OSConnectionError, TransportError
 
 logger = logging.getLogger(__name__)
+
+# Total wall-clock budget for a single client call (search/count), across any retry.
+# When the budget is exceeded, raise WazuhClientError(code="timeout").
+CALL_DEADLINE_SEC = 10.0
+
+# Per-attempt request_timeout is half the deadline so the retry fits within budget.
+PER_ATTEMPT_TIMEOUT = 5.0
 
 
 class WazuhClientError(Exception):
@@ -435,28 +464,51 @@ class WazuhClientError(Exception):
 
 
 class WazuhClient:
-    def __init__(self, url: str, user: str, password: str, timeout: int = 10):
-        self._timeout = timeout
+    def __init__(
+        self,
+        url: str,
+        user: str,
+        password: str,
+        timeout: float = CALL_DEADLINE_SEC,
+    ):
+        self._deadline = timeout
         self._os = OpenSearch(
             hosts=[url],
-            http_auth=(user, password),
+            http_auth=(user, password) if user else None,
             use_ssl=url.startswith("https"),
             verify_certs=False,  # self-signed certs in the Wazuh stack
             ssl_show_warn=False,
             http_compress=True,
         )
-        if not url.startswith("https") or True:
+        if url.startswith("https"):
             logger.warning("TLS cert verification disabled (self-signed Wazuh certs)")
 
-    def _retry_once(self, fn, *args, **kwargs):
+    def _call_with_retry(self, fn, **kwargs):
+        """Run fn with up to one retry, bounded by a monotonic deadline.
+
+        If the first attempt fails AND the deadline has already passed, raise
+        'timeout' without retrying. If both attempts fail, raise
+        'opensearch_unavailable'.
+        """
+        start = time.monotonic()
         try:
-            return fn(*args, **kwargs)
+            return fn(request_timeout=PER_ATTEMPT_TIMEOUT, **kwargs)
         except (OSConnectionError, TransportError) as e:
-            logger.warning("OpenSearch transient error: %s, retrying once", e)
-            time.sleep(0.5)
+            elapsed = time.monotonic() - start
+            remaining = self._deadline - elapsed
+            if remaining <= 0:
+                raise WazuhClientError(code="timeout", message=str(e), cause=e)
+            logger.warning("OpenSearch transient error: %s, retrying once (remaining=%.1fs)", e, remaining)
+            # Small backoff, but never beyond the remaining budget.
+            sleep_for = min(0.5, max(0.0, remaining - 0.1))
+            time.sleep(sleep_for)
             try:
-                return fn(*args, **kwargs)
+                return fn(request_timeout=min(PER_ATTEMPT_TIMEOUT, remaining), **kwargs)
             except (OSConnectionError, TransportError) as e2:
+                # If we exhausted the wall clock specifically, surface as 'timeout'
+                # so the LLM gets a useful hint per the spec error table.
+                if time.monotonic() - start >= self._deadline:
+                    raise WazuhClientError(code="timeout", message=str(e2), cause=e2)
                 raise WazuhClientError(
                     code="opensearch_unavailable",
                     message=str(e2),
@@ -464,14 +516,10 @@ class WazuhClient:
                 )
 
     def search(self, index: str, body: dict[str, Any]) -> dict[str, Any]:
-        return self._retry_once(
-            self._os.search, index=index, body=body, request_timeout=self._timeout
-        )
+        return self._call_with_retry(self._os.search, index=index, body=body)
 
     def count(self, index: str, body: dict[str, Any]) -> int:
-        resp = self._retry_once(
-            self._os.count, index=index, body=body, request_timeout=self._timeout
-        )
+        resp = self._call_with_retry(self._os.count, index=index, body=body)
         return resp["count"]
 
     def ping(self) -> bool:
@@ -652,21 +700,36 @@ git commit -m "feat(mcp-server): token-bucket rate limiter + result-cap helper"
 - Create: `mcp-server/src/logging_setup.py`
 - Create: `mcp-server/tests/test_logging_setup.py`
 
+**Convention to match:** both existing sidecars (`msp-poller`, `threat-intel`) write JSONL events to the *shared* file `/var/ossec/logs/sidecar-status/sidecar-status.json`. Each line is an event with this schema:
+
+```json
+{"timestamp": "2026-04-24T12:00:00", "event_type": "sidecar_status",
+ "source": "sidecar-status", "sidecar": "<name>",
+ "job_type": "heartbeat", "sync_status": "success|error|running", ...}
+```
+
+Events are appended; rotation happens when the file exceeds `MAX_LOG_SIZE` (default 10MB). Rules 100500-100504 ingest these events. **Our HeartbeatWriter must follow this exact convention** — do NOT write a per-component file.
+
 - [ ] **Step 1: Write the failing tests**
 
 Create `mcp-server/tests/test_logging_setup.py`:
 
 ```python
-"""Tests for structured logging + heartbeat writer."""
+"""Tests for structured logging + shared JSONL heartbeat writer."""
 import json
-import time
 from pathlib import Path
+
+import pytest
 
 from src.logging_setup import HeartbeatWriter, configure_json_logging
 
 
+def _read_events(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
 def test_configure_json_logging_emits_json(capsys):
-    configure_json_logging("test")
+    configure_json_logging()
     import logging
 
     logging.getLogger("x").info("hello", extra={"tool": "foo"})
@@ -677,41 +740,69 @@ def test_configure_json_logging_emits_json(capsys):
     assert last["level"] == "INFO"
 
 
-def test_heartbeat_writer_writes_status(tmp_path: Path):
-    target = tmp_path / "status.json"
-    hb = HeartbeatWriter(
-        component="wazuh-mcp", path=target, interval=60
-    )
-    hb.record_ok()
-    hb._flush()
-    data = json.loads(target.read_text())
-    assert data["component"] == "wazuh-mcp"
-    assert data["status"] == "ok"
-    assert "last_heartbeat" in data
+def test_heartbeat_writer_appends_heartbeat_event(tmp_path: Path):
+    target = tmp_path / "sidecar-status.json"
+    hb = HeartbeatWriter(sidecar="wazuh-mcp", path=target, interval=60)
+    hb._emit_heartbeat()
+    events = _read_events(target)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["event_type"] == "sidecar_status"
+    assert ev["source"] == "sidecar-status"
+    assert ev["sidecar"] == "wazuh-mcp"
+    assert ev["job_type"] == "heartbeat"
+    assert ev["sync_status"] == "running"
 
 
-def test_heartbeat_writer_records_errors(tmp_path: Path):
-    target = tmp_path / "status.json"
-    hb = HeartbeatWriter(component="wazuh-mcp", path=target, interval=60)
-    hb.record_error("opensearch_unavailable: timeout")
-    hb._flush()
-    data = json.loads(target.read_text())
-    assert data["status"] == "error"
-    assert data["last_error"] == "opensearch_unavailable: timeout"
-    assert data["error_count_10m"] == 1
+def test_heartbeat_writer_appends_error_event_immediately(tmp_path: Path):
+    target = tmp_path / "sidecar-status.json"
+    hb = HeartbeatWriter(sidecar="wazuh-mcp", path=target, interval=60)
+    hb.record_error("opensearch_unavailable: timeout", job_type="tool_call")
+    events = _read_events(target)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["sync_status"] == "error"
+    assert ev["error_message"] == "opensearch_unavailable: timeout"
+    assert ev["job_type"] == "tool_call"
+    assert ev["sidecar"] == "wazuh-mcp"
 
 
-def test_heartbeat_writer_rolls_error_count_over_window(tmp_path: Path, monkeypatch):
-    target = tmp_path / "status.json"
+def test_heartbeat_writer_tracks_error_count_in_heartbeat_stats(tmp_path: Path, monkeypatch):
+    target = tmp_path / "sidecar-status.json"
     now = [1000.0]
     monkeypatch.setattr("src.logging_setup.time.time", lambda: now[0])
-    hb = HeartbeatWriter(component="wazuh-mcp", path=target, interval=60)
-    hb.record_error("e1")
-    now[0] += 700  # >10 min elapsed
-    hb.record_error("e2")
-    hb._flush()
-    data = json.loads(target.read_text())
-    assert data["error_count_10m"] == 1  # old error rolled off
+    hb = HeartbeatWriter(sidecar="wazuh-mcp", path=target, interval=60)
+    hb.record_error("e1", job_type="tool_call")
+    now[0] += 700  # >10 min elapsed — old error should roll off
+    hb.record_error("e2", job_type="tool_call")
+    hb._emit_heartbeat()
+    events = _read_events(target)
+    heartbeats = [e for e in events if e["job_type"] == "heartbeat"]
+    assert len(heartbeats) == 1
+    assert heartbeats[0]["stats"]["error_count_10m"] == 1  # e1 rolled off
+
+
+def test_heartbeat_writer_rotates_at_max_size(tmp_path: Path):
+    target = tmp_path / "sidecar-status.json"
+    hb = HeartbeatWriter(
+        sidecar="wazuh-mcp", path=target, interval=60,
+        max_size=200, max_backups=1,
+    )
+    for i in range(50):
+        hb.record_error(f"msg-{i}", job_type="tool_call")
+    assert (tmp_path / "sidecar-status.json.1").exists()
+    assert target.exists()
+    # current file must be smaller than rotation threshold after last rotate
+    assert target.stat().st_size <= 400  # some slack for the final write
+
+
+def test_heartbeat_writer_record_ok_does_not_write_event(tmp_path: Path):
+    """record_ok() tracks in memory; only heartbeats and errors write events."""
+    target = tmp_path / "sidecar-status.json"
+    hb = HeartbeatWriter(sidecar="wazuh-mcp", path=target, interval=60)
+    hb.record_ok(job_type="tool_call")
+    hb.record_ok(job_type="tool_call")
+    assert not target.exists()
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -727,9 +818,10 @@ Expected: ImportError.
 Create `mcp-server/src/logging_setup.py`:
 
 ```python
-"""JSON stdout logging + sidecar-status heartbeat file.
+"""JSON stdout logging + shared JSONL heartbeat writer.
 
-Heartbeat schema matches rules 100500-100504 in wazuh-config/rules/.
+Appends events to the sidecar-status.json stream shared with msp-poller and
+threat-intel. Events are ingested by rule chain 100500-100504.
 """
 import json
 import logging
@@ -738,28 +830,33 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 
 class JsonFormatter(logging.Formatter):
+    _SKIP = frozenset({
+        "args", "msg", "levelname", "name", "created", "msecs",
+        "relativeCreated", "levelno", "pathname", "filename", "module",
+        "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+        "thread", "threadName", "processName", "process", "getMessage",
+        "taskName",
+    })
+
     def format(self, record: logging.LogRecord) -> str:
-        base = {
+        base: dict[str, Any] = {
             "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
             "level": record.levelname,
             "component": record.name,
             "msg": record.getMessage(),
         }
         for k, v in record.__dict__.items():
-            if k in ("args", "msg", "levelname", "name", "created", "msecs",
-                     "relativeCreated", "levelno", "pathname", "filename",
-                     "module", "exc_info", "exc_text", "stack_info", "lineno",
-                     "funcName", "thread", "threadName", "processName",
-                     "process", "getMessage"):
+            if k in self._SKIP:
                 continue
             base[k] = v
         return json.dumps(base, default=str)
 
 
-def configure_json_logging(service: str) -> None:
+def configure_json_logging() -> None:
     root = logging.getLogger()
     root.handlers.clear()
     h = logging.StreamHandler(sys.stdout)
@@ -769,66 +866,131 @@ def configure_json_logging(service: str) -> None:
 
 
 class HeartbeatWriter:
-    """Thread-safe writer for sidecar-status.json.
+    """Appends sidecar-status events (JSONL) to the shared status file.
 
-    Call record_ok() on each successful tool call and record_error() on
-    each failure. A background thread flushes the JSON file every `interval`
-    seconds; _flush() is also public for test use.
+    Schema matches the existing msp-poller / threat-intel StatusReporter, so the
+    same rule chain (100500-100504) ingests our events.
+
+    Usage:
+        hb = HeartbeatWriter(sidecar="wazuh-mcp", path=Path("/var/ossec/logs/sidecar-status/sidecar-status.json"))
+        hb.start()                                       # begins periodic heartbeats
+        hb.record_ok(job_type="tool_call")               # in-memory counter only
+        hb.record_error("bad DSL", job_type="tool_call") # writes error event immediately
+        hb.stop()                                        # on shutdown
     """
 
-    def __init__(self, component: str, path: Path, interval: int = 60):
-        self._component = component
+    def __init__(
+        self,
+        sidecar: str,
+        path: Path,
+        interval: int = 60,
+        max_size: int = 10 * 1024 * 1024,
+        max_backups: int = 2,
+    ):
+        self._sidecar = sidecar
         self._path = Path(path)
         self._interval = interval
-        self._start = time.time()
-        self._last_error: str | None = None
+        self._max_size = max_size
+        self._max_backups = max_backups
+        self._started = time.time()
+        self._ok_count = 0
         self._errors: deque[tuple[float, str]] = deque()  # (ts, message)
+        self._last_error: str | None = None
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+        self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
 
+    # ---------- lifecycle ----------
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True, name="heartbeat")
         self._thread.start()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_evt.set()
         if self._thread:
             self._thread.join(timeout=5)
 
-    def record_ok(self) -> None:
+    # ---------- public recording API ----------
+    def record_ok(self, job_type: str = "tool_call") -> None:
+        """Count a success in memory; no disk write — reduces JSONL churn."""
         with self._lock:
+            self._ok_count += 1
             self._prune_locked()
 
-    def record_error(self, message: str) -> None:
+    def record_error(self, message: str, job_type: str = "tool_call") -> None:
+        """Append an error event AND track in memory for the next heartbeat."""
+        now = time.time()
         with self._lock:
-            self._errors.append((time.time(), message))
+            self._errors.append((now, message))
             self._last_error = message
             self._prune_locked()
+        self._append_event({
+            "timestamp": _iso(now),
+            "event_type": "sidecar_status",
+            "source": "sidecar-status",
+            "sidecar": self._sidecar,
+            "job_type": job_type,
+            "sync_status": "error",
+            "error_message": message,
+        })
 
+    # ---------- internals ----------
     def _prune_locked(self) -> None:
         cutoff = time.time() - 600  # 10 min
         while self._errors and self._errors[0][0] < cutoff:
             self._errors.popleft()
 
     def _run(self) -> None:
-        while not self._stop.wait(self._interval):
-            self._flush()
+        while not self._stop_evt.wait(self._interval):
+            self._emit_heartbeat()
 
-    def _flush(self) -> None:
+    def _emit_heartbeat(self) -> None:
+        now = time.time()
         with self._lock:
             self._prune_locked()
-            err_count = len(self._errors)
-            payload = {
-                "component": self._component,
-                "status": "error" if err_count > 0 else "ok",
-                "last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "uptime_sec": int(time.time() - self._start),
-                "error_count_10m": err_count,
+            stats = {
+                "uptime_sec": int(now - self._started),
+                "ok_count_total": self._ok_count,
+                "error_count_10m": len(self._errors),
                 "last_error": self._last_error,
             }
+        self._append_event({
+            "timestamp": _iso(now),
+            "event_type": "sidecar_status",
+            "source": "sidecar-status",
+            "sidecar": self._sidecar,
+            "job_type": "heartbeat",
+            "sync_status": "running",
+            "stats": stats,
+        })
+
+    def _append_event(self, event: dict[str, Any]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(payload))
+        self._rotate_if_needed()
+        with open(self._path, "a") as f:
+            f.write(json.dumps(event) + "\n")
+
+    def _rotate_if_needed(self) -> None:
+        if not self._path.exists() or self._path.stat().st_size < self._max_size:
+            return
+        # Drop oldest, shift everything else down.
+        for i in range(self._max_backups, 0, -1):
+            src = self._path.with_suffix(f".json.{i}") if i > 1 else self._path.with_suffix(".json.1")
+            dst = self._path.with_suffix(f".json.{i + 1}")
+            # Normalize the "no suffix" base case (.json -> .json.1).
+            if i == 1:
+                src = self._path.parent / (self._path.name + ".1")
+                dst = self._path.parent / (self._path.name + ".2")
+            if src.exists():
+                if i >= self._max_backups:
+                    src.unlink()
+                else:
+                    src.rename(dst)
+        self._path.rename(self._path.parent / (self._path.name + ".1"))
+
+
+def _iso(ts: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts))
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -837,14 +999,14 @@ class HeartbeatWriter:
 python -m pytest tests/test_logging_setup.py -v
 ```
 
-Expected: 4 passed.
+Expected: 6 passed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cd /path/to/firewalla-wazuh
 git add mcp-server/src/logging_setup.py mcp-server/tests/test_logging_setup.py
-git commit -m "feat(mcp-server): JSON logging + thread-safe heartbeat writer"
+git commit -m "feat(mcp-server): JSONL heartbeat writer to shared sidecar-status"
 ```
 
 ---
@@ -1396,6 +1558,10 @@ Append to `mcp-server/src/wazuh_service.py`:
 
 ```python
     def alert_overview(self, time_range: str) -> dict[str, Any]:
+        # NOTE: `data.source` is populated by our sidecars (firewalla-msp,
+        # windows-srp, threat-intel) but NOT by native OSSEC/syscheck rules.
+        # We pair it with a rule-groups breakdown so OSSEC/syscheck events
+        # remain visible even though they fall into the "unknown" source bucket.
         body = {
             "size": 0,
             "query": {
@@ -1830,7 +1996,7 @@ git commit -m "feat(mcp-server): threat_intel_matches over custom + built-in lis
 
 ## Task 12: `sidecar_health` (TDD)
 
-Reads the sidecar-status JSON files from the shared volume.
+Reads the shared JSONL `sidecar-status.json` stream (tail-only) and reports the latest state per sidecar component. File is appended by all sidecars (msp-poller, threat-intel, wazuh-mcp).
 
 **Files:**
 - Modify: `mcp-server/src/wazuh_service.py`
@@ -1841,7 +2007,7 @@ Reads the sidecar-status JSON files from the shared volume.
 Create `mcp-server/tests/test_service_health.py`:
 
 ```python
-"""Tests for WazuhDataService.sidecar_health."""
+"""Tests for WazuhDataService.sidecar_health — reads JSONL stream."""
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -1849,57 +2015,94 @@ from unittest.mock import MagicMock
 from src.wazuh_service import WazuhDataService
 
 
-def _write_status(dir: Path, name: str, status: str, last_error=None, errors=0):
-    (dir / f"{name}.json").write_text(json.dumps({
-        "component": name,
-        "status": status,
-        "last_heartbeat": "2026-04-24T10:00:00Z",
-        "uptime_sec": 3600,
-        "error_count_10m": errors,
-        "last_error": last_error,
-    }))
+def _append(path: Path, event: dict) -> None:
+    with open(path, "a") as f:
+        f.write(json.dumps(event) + "\n")
 
 
-def test_sidecar_health_reads_all_status_files(tmp_path: Path):
-    _write_status(tmp_path, "msp-poller", "ok")
-    _write_status(tmp_path, "threat-intel", "ok")
-    _write_status(tmp_path, "wazuh-mcp", "error", "opensearch_unavailable", 3)
-    svc = WazuhDataService(MagicMock(), status_dir=tmp_path)
+def _heartbeat(sidecar: str, ts: str, error_count: int = 0, last_error=None) -> dict:
+    return {
+        "timestamp": ts,
+        "event_type": "sidecar_status",
+        "source": "sidecar-status",
+        "sidecar": sidecar,
+        "job_type": "heartbeat",
+        "sync_status": "running",
+        "stats": {
+            "uptime_sec": 3600,
+            "ok_count_total": 42,
+            "error_count_10m": error_count,
+            "last_error": last_error,
+        },
+    }
 
+
+def _error(sidecar: str, ts: str, message: str) -> dict:
+    return {
+        "timestamp": ts,
+        "event_type": "sidecar_status",
+        "source": "sidecar-status",
+        "sidecar": sidecar,
+        "job_type": "tool_call",
+        "sync_status": "error",
+        "error_message": message,
+    }
+
+
+def test_sidecar_health_reports_latest_per_sidecar(tmp_path: Path, monkeypatch):
+    # Freeze "now" at 2026-04-24T10:05:00Z — same moment as the latest events.
+    monkeypatch.setattr("src.wazuh_service.time.time", lambda: 1777629900.0)
+    stream = tmp_path / "sidecar-status.json"
+    _append(stream, _heartbeat("msp-poller",  "2026-04-24T10:03:00"))
+    _append(stream, _heartbeat("threat-intel", "2026-04-24T10:04:00"))
+    _append(stream, _error("wazuh-mcp", "2026-04-24T10:04:30", "opensearch_unavailable"))
+    _append(stream, _heartbeat("wazuh-mcp", "2026-04-24T10:05:00", error_count=3, last_error="opensearch_unavailable"))
+
+    svc = WazuhDataService(MagicMock(), status_file=stream)
     out = svc.sidecar_health()
 
     names = {s["name"]: s for s in out["sidecars"]}
     assert set(names) == {"msp-poller", "threat-intel", "wazuh-mcp"}
-    assert names["wazuh-mcp"]["status"] == "error"
     assert names["wazuh-mcp"]["error_count_10m"] == 3
-    assert out["summary"]["any_errors"] is True
-    assert out["summary"]["count_ok"] == 2
-    assert out["summary"]["count_error"] == 1
+    assert names["wazuh-mcp"]["last_error"] == "opensearch_unavailable"
+    # latest event for wazuh-mcp is the heartbeat (running), not the error.
+    assert names["wazuh-mcp"]["status"] == "running"
+    assert out["summary"]["count_ok"] == 3
+    assert out["summary"]["any_errors"] is False  # no sidecar is 'error' or 'stale' currently
 
 
-def test_sidecar_health_reports_stale_heartbeat(tmp_path: Path, monkeypatch):
-    (tmp_path / "msp-poller.json").write_text(json.dumps({
-        "component": "msp-poller",
-        "status": "ok",
-        "last_heartbeat": "2026-04-24T08:00:00Z",  # 2 hours ago
-        "uptime_sec": 100,
-        "error_count_10m": 0,
-        "last_error": None,
-    }))
-    monkeypatch.setattr(
-        "src.wazuh_service.time.time",
-        lambda: 1745489000.0,  # ~2026-04-24T10:03:20Z
-    )
-    svc = WazuhDataService(MagicMock(), status_dir=tmp_path)
+def test_sidecar_health_flags_stale_heartbeat(tmp_path: Path, monkeypatch):
+    # Freeze "now" to +10 min past the only heartbeat.
+    monkeypatch.setattr("src.wazuh_service.time.time", lambda: 1777630200.0)  # 2026-04-24T10:10:00Z
+    stream = tmp_path / "sidecar-status.json"
+    _append(stream, _heartbeat("msp-poller", "2026-04-24T10:00:00"))
+
+    svc = WazuhDataService(MagicMock(), status_file=stream)
     out = svc.sidecar_health()
     assert out["sidecars"][0]["status"] == "stale"
+    assert out["summary"]["any_errors"] is True
 
 
-def test_sidecar_health_empty_dir(tmp_path: Path):
-    svc = WazuhDataService(MagicMock(), status_dir=tmp_path)
+def test_sidecar_health_missing_file_returns_empty(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("src.wazuh_service.time.time", lambda: 1777629900.0)
+    svc = WazuhDataService(MagicMock(), status_file=tmp_path / "nope.json")
     out = svc.sidecar_health()
     assert out["sidecars"] == []
     assert out["summary"]["count_ok"] == 0
+
+
+def test_sidecar_health_skips_malformed_lines(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("src.wazuh_service.time.time", lambda: 1777629900.0)
+    stream = tmp_path / "sidecar-status.json"
+    stream.write_text(
+        "not-json\n"
+        + json.dumps(_heartbeat("msp-poller", "2026-04-24T10:03:00")) + "\n"
+        + "{broken\n"
+    )
+    svc = WazuhDataService(MagicMock(), status_file=stream)
+    out = svc.sidecar_health()
+    assert len(out["sidecars"]) == 1
+    assert out["sidecars"][0]["name"] == "msp-poller"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1908,18 +2111,19 @@ def test_sidecar_health_empty_dir(tmp_path: Path):
 python -m pytest tests/test_service_health.py -v
 ```
 
-Expected: `WazuhDataService.__init__()` got an unexpected keyword argument `status_dir`.
+Expected: `WazuhDataService.__init__()` got an unexpected keyword argument `status_file`.
 
 - [ ] **Step 3: Update the service constructor and add the method**
 
-Replace the `__init__` in `mcp-server/src/wazuh_service.py`:
+At the top of `mcp-server/src/wazuh_service.py`, add the monkeypatchable time alias and other imports:
 
 ```python
-import time as _time  # add at top with other imports
-from datetime import datetime, timezone
+import json
+import time as _time
+from datetime import datetime
 from pathlib import Path
 
-# Make this module-level alias so tests can monkeypatch src.wazuh_service.time
+# Module-level alias so tests can monkeypatch src.wazuh_service.time.
 time = _time
 ```
 
@@ -1930,44 +2134,59 @@ Change the class signature:
         self,
         client,
         alerts_index: str = ALERTS_INDEX_DEFAULT,
-        status_dir: Path | None = None,
+        status_file: Path | None = None,
     ):
         self._client = client
         self._alerts_index = alerts_index
-        self._status_dir = Path(status_dir) if status_dir else None
+        self._status_file = Path(status_file) if status_file else None
 ```
 
 Add the method:
 
 ```python
-    _STALE_SECONDS = 300  # 5 minutes
+    _STALE_SECONDS = 300  # 5 min; spec §5 says >5min stale triggers rule 100504
+
+    # Read up to this many trailing bytes — enough to cover many minutes of
+    # heartbeats even in a busy stream.
+    _TAIL_BYTES = 256 * 1024
 
     def sidecar_health(self) -> dict[str, Any]:
         now = time.time()
-        sidecars: list[dict[str, Any]] = []
-        if self._status_dir and self._status_dir.exists():
-            for p in sorted(self._status_dir.glob("*.json")):
-                try:
-                    data = json.loads(p.read_text())
-                except Exception:
+        latest: dict[str, dict[str, Any]] = {}
+
+        if self._status_file and self._status_file.exists():
+            data = self._tail_read(self._status_file, self._TAIL_BYTES)
+            for line in data.splitlines():
+                line = line.strip()
+                if not line:
                     continue
-                last_hb = data.get("last_heartbeat")
-                stale = False
-                if last_hb:
-                    try:
-                        dt = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
-                        age = now - dt.timestamp()
-                        stale = age > self._STALE_SECONDS
-                    except ValueError:
-                        stale = True
-                sidecars.append({
-                    "name": data.get("component", p.stem),
-                    "status": "stale" if stale else data.get("status", "unknown"),
-                    "last_heartbeat": last_hb,
-                    "error_count_10m": data.get("error_count_10m", 0),
-                    "last_error": data.get("last_error"),
-                })
-        ok = sum(1 for s in sidecars if s["status"] == "ok")
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                name = ev.get("sidecar") or ev.get("component")
+                if not name:
+                    continue
+                prev = latest.get(name)
+                # Keep whichever event is newer for this sidecar.
+                if prev is None or ev.get("timestamp", "") >= prev.get("timestamp", ""):
+                    latest[name] = ev
+
+        sidecars: list[dict[str, Any]] = []
+        for name in sorted(latest):
+            ev = latest[name]
+            stats = ev.get("stats") or {}
+            last_hb = ev.get("timestamp")
+            stale = self._is_stale(last_hb, now)
+            status = "stale" if stale else ev.get("sync_status", "unknown")
+            sidecars.append({
+                "name": name,
+                "status": status,
+                "last_heartbeat": last_hb,
+                "error_count_10m": stats.get("error_count_10m", 0),
+                "last_error": stats.get("last_error") or ev.get("error_message"),
+            })
+        ok = sum(1 for s in sidecars if s["status"] in ("running", "success"))
         err = sum(1 for s in sidecars if s["status"] in ("error", "stale"))
         return {
             "sidecars": sidecars,
@@ -1977,9 +2196,37 @@ Add the method:
                 "any_errors": err > 0,
             },
         }
-```
 
-Add `import json` at the top of the module if not already present.
+    @staticmethod
+    def _tail_read(path: Path, n: int) -> str:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            start = max(0, size - n)
+            f.seek(start)
+            data = f.read()
+        # Drop the first (possibly partial) line if we didn't start at byte 0.
+        text = data.decode("utf-8", errors="replace")
+        if start > 0:
+            nl = text.find("\n")
+            text = text[nl + 1 :] if nl >= 0 else ""
+        return text
+
+    @staticmethod
+    def _is_stale(last_hb: str | None, now: float) -> bool:
+        if not last_hb:
+            return True
+        try:
+            # Accept both "2026-04-24T10:00:00" and "...Z" forms.
+            dt = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
+            # Naive timestamps: assume UTC (matches HeartbeatWriter).
+            if dt.tzinfo is None:
+                from datetime import timezone
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (now - dt.timestamp()) > WazuhDataService._STALE_SECONDS
+        except ValueError:
+            return True
+```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1987,9 +2234,9 @@ Add `import json` at the top of the module if not already present.
 python -m pytest tests/test_service_health.py -v
 ```
 
-Expected: 3 passed.
+Expected: 4 passed.
 
-- [ ] **Step 5: Run all service tests to check we didn't break anything**
+- [ ] **Step 5: Run full service suite**
 
 ```bash
 python -m pytest tests/ -v
@@ -2002,7 +2249,7 @@ Expected: all tests pass.
 ```bash
 cd /path/to/firewalla-wazuh
 git add mcp-server/src/wazuh_service.py mcp-server/tests/test_service_health.py
-git commit -m "feat(mcp-server): sidecar_health reads shared status volume"
+git commit -m "feat(mcp-server): sidecar_health reads shared JSONL status stream"
 ```
 
 ---
@@ -2036,6 +2283,9 @@ def test_get_alert_returns_source():
     svc = WazuhDataService(client)
     out = svc.get_alert("a1")
     assert out == {"_id": "a1", "rule": {"id": "100451"}, "agent": {"name": "h"}}
+    # Verify the correct query form — `ids`, not `term: _id`.
+    body = client.search.call_args.kwargs["body"]
+    assert body["query"] == {"ids": {"values": ["a1"]}}
 
 
 def test_get_alert_raises_when_missing():
@@ -2067,11 +2317,13 @@ Add the method on `WazuhDataService`:
 
 ```python
     def get_alert(self, alert_id: str) -> dict[str, Any]:
+        # Use the `ids` query, not `term: _id` — the latter is deprecated and
+        # will fail on newer OpenSearch versions.
         resp = self._client.search(
             index=self._alerts_index,
             body={
                 "size": 1,
-                "query": {"term": {"_id": alert_id}},
+                "query": {"ids": {"values": [alert_id]}},
             },
         )
         hits = resp["hits"]["hits"]
@@ -2310,23 +2562,34 @@ git commit -m "feat(mcp-server): entity_activity multi-source pivot"
 
 ---
 
-## Task 15: MCP server bootstrap (app, auth, transports, startup check)
+## Task 15: MCP server bootstrap (app, tools, error envelope)
 
 **Files:**
 - Create: `mcp-server/src/mcp_server.py`
 - Create: `mcp-server/tests/test_mcp_server_bootstrap.py`
+
+**Pattern notes:**
+- Tool functions declare each argument individually with `Annotated[T, Field(...)]`. This makes FastMCP produce a flat JSON schema that LLM clients call naturally. A single Pydantic-model argument would make clients pass `{"input": {...}}`, which most MCP clients do not unwrap.
+- **Bearer-token auth is NOT enforced at this layer** — it is enforced by a starlette middleware added around the SSE app in `main.py` (Task 16). By the time a tool function runs, the request is already authenticated.
+- Error envelope covers all eight cases from the spec §5 table, including `timeout` (from `WazuhClientError(code="timeout")`) and `invalid_query` (best-effort match on OpenSearch DSL-parser errors).
 
 - [ ] **Step 1: Write the failing tests**
 
 Create `mcp-server/tests/test_mcp_server_bootstrap.py`:
 
 ```python
-"""Tests for MCP server bootstrap: startup self-check and auth hook."""
+"""Tests for MCP server bootstrap: startup self-check, tool wiring, error envelope."""
 from unittest.mock import MagicMock
 
 import pytest
 
-from src.mcp_server import build_app, startup_self_check
+from src.limits import RateLimitExceeded, RateLimiter
+from src.mcp_server import (
+    build_app, startup_self_check, _wrap_call, _classify_client_error,
+)
+from src.time_range import TimeRangeError
+from src.wazuh_client import WazuhClientError
+from src.wazuh_service import AlertNotFound
 
 
 def test_startup_self_check_succeeds_when_ping_and_query_pass():
@@ -2343,10 +2606,79 @@ def test_startup_self_check_fails_on_ping_false():
         startup_self_check(client, alerts_index="wazuh-alerts-*")
 
 
-def test_build_app_returns_fastmcp_instance():
-    app = build_app(service=MagicMock(), api_key="k", rate_limiter=MagicMock())
-    # FastMCP apps expose a 'run' method
-    assert hasattr(app, "run")
+def test_build_app_returns_fastmcp_instance_with_eight_tools():
+    app = build_app(service=MagicMock(), rate_limiter=MagicMock())
+    assert hasattr(app, "run")  # FastMCP app
+    # Retrieve the registered tool names.
+    names = {t.name for t in app._tool_manager.list_tools()}  # internal API but stable in mcp>=1.2
+    expected = {
+        "search_alerts", "aggregate_alerts", "alert_overview", "trend_delta",
+        "threat_intel_matches", "sidecar_health", "get_alert", "entity_activity",
+    }
+    assert expected.issubset(names)
+
+
+def test_wrap_returns_rate_limited_envelope():
+    rl = MagicMock()
+    rl.check.side_effect = RateLimitExceeded(retry_after=5)
+    result = _wrap_call("t", rl, lambda: "ok")
+    assert result["error"] == "rate_limited"
+    assert result["retry_after"] == 5
+
+
+def test_wrap_returns_timeout_envelope():
+    rl = MagicMock()
+    def boom():
+        raise WazuhClientError(code="timeout", message="too slow")
+    result = _wrap_call("t", rl, boom)
+    assert result["error"] == "timeout"
+    assert "time_range_hint" in result
+
+
+def test_wrap_returns_invalid_query_envelope_for_transport_parser_errors():
+    rl = MagicMock()
+    def boom():
+        raise WazuhClientError(code="opensearch_unavailable",
+                                message="parse_exception: unknown field [bogus]")
+    result = _wrap_call("t", rl, boom)
+    # Opensearch parser errors are reclassified as invalid_query with a hint.
+    assert result["error"] == "invalid_query"
+    assert "hint" in result
+
+
+def test_wrap_returns_not_found_for_alert_not_found():
+    rl = MagicMock()
+    def boom():
+        raise AlertNotFound("abc")
+    assert _wrap_call("t", rl, boom)["error"] == "not_found"
+
+
+def test_wrap_returns_invalid_input_for_time_range_error():
+    rl = MagicMock()
+    def boom():
+        raise TimeRangeError("bad span")
+    out = _wrap_call("t", rl, boom)
+    assert out["error"] == "invalid_input"
+    assert out["field"] == "time_range"
+
+
+def test_wrap_returns_internal_with_request_id_for_unexpected_exception():
+    rl = MagicMock()
+    def boom():
+        raise RuntimeError("???")
+    out = _wrap_call("t", rl, boom)
+    assert out["error"] == "internal"
+    assert "request_id" in out
+
+
+def test_classify_client_error_detects_parser_patterns():
+    e = WazuhClientError(code="opensearch_unavailable",
+                         message="parse_exception: unknown field")
+    assert _classify_client_error(e) == "invalid_query"
+
+    e2 = WazuhClientError(code="opensearch_unavailable",
+                          message="ConnectionError: no route")
+    assert _classify_client_error(e2) == "opensearch_unavailable"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2364,16 +2696,20 @@ Create `mcp-server/src/mcp_server.py`:
 ```python
 """FastMCP app factory + tool definitions.
 
-Tool functions are thin adapters over WazuhDataService. They validate input
-(via Pydantic), enforce rate limits, call the service, enforce result caps,
-and shape errors into a stable envelope visible to the LLM.
+Tools are thin adapters over WazuhDataService. Each tool declares individual
+arguments (NOT a single Pydantic-model wrapper) so FastMCP produces a flat
+JSON schema that Claude Code and other MCP clients call naturally.
+
+Bearer-token auth is enforced by a starlette middleware in main.py, BEFORE
+tool code runs. By the time a tool function is entered, the request is already
+authenticated.
 """
 import logging
 import uuid
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from src.limits import RateLimitExceeded, RateLimiter, cap_results
 from src.time_range import TimeRangeError
@@ -2383,12 +2719,13 @@ from src.wazuh_service import AlertNotFound, WazuhDataService
 logger = logging.getLogger(__name__)
 
 SOURCES_DESC = (
-    "Current alert sources (field: data.source): "
+    "Data sources present in `data.source` (sidecar-generated events): "
     "'firewalla-msp' (network alarms/flows), "
     "'windows-srp' (executable allow/block on Windows endpoints), "
-    "'threat-intel' (CDB-list matches from rules 100450-100453), "
-    "'ossec'/'syscheck' (native Wazuh host and FIM events), "
-    "'malicious-ioc' (built-in Wazuh IP/domain/hash feeds, rules 99901-99999)."
+    "'threat-intel' (CDB-list matches from rules 100450-100453). "
+    "Native Wazuh events (OSSEC host, syscheck/FIM, built-in malicious-ioc "
+    "99901-99999) do NOT populate `data.source` — they are filterable via "
+    "`rule.groups` and `rule.id`."
 )
 
 COMMON_FIELDS_DESC = (
@@ -2408,214 +2745,226 @@ def startup_self_check(client, alerts_index: str) -> None:
     logger.info("startup self-check ok")
 
 
-def _error_envelope(code: str, message: str, **extra) -> dict[str, Any]:
+# ---------- Error envelope ----------
+
+def _envelope(code: str, message: str, **extra) -> dict[str, Any]:
     out = {"error": code, "message": message}
     out.update(extra)
     return out
 
 
-def _key_fingerprint(api_key: str) -> str:
-    return api_key[:4] + "…" + api_key[-2:] if len(api_key) >= 6 else "redacted"
+_PARSER_HINT = (
+    "Check field names and Lucene syntax. Common fields: "
+    "agent.name, rule.id, rule.level, rule.groups, data.source, "
+    "data.srcip, data.dstip, data.srp.target_path."
+)
 
 
-def _wrap(tool_name: str, rate_limiter: RateLimiter, api_key: str, fn, kwargs):
+def _classify_client_error(e: WazuhClientError) -> str:
+    """Map ambiguous client errors to spec error codes.
+
+    OpenSearch returns DSL parser errors via TransportError — our client wraps
+    them as 'opensearch_unavailable', but they really are 'invalid_query'. We
+    sniff the message for common parser markers.
+    """
+    if e.code != "opensearch_unavailable":
+        return e.code
+    msg = (e.message or "").lower()
+    if any(m in msg for m in (
+        "parse_exception", "parsing_exception", "no mapping found",
+        "x_content_parse_exception", "illegal_argument_exception: field",
+    )):
+        return "invalid_query"
+    return "opensearch_unavailable"
+
+
+def _wrap_call(tool_name: str, rate_limiter: RateLimiter, fn) -> Any:
+    """Single-bucket rate limit + error envelope.
+
+    Rate limit is global for MVP (single authenticated user = single key). If
+    multi-user auth is added later, switch the rate-limit key to something per-
+    caller (e.g., hashed presented token, exposed via FastMCP Context).
+    """
     req_id = uuid.uuid4().hex[:8]
-    key_fp = _key_fingerprint(api_key)
     try:
-        rate_limiter.check(api_key)
+        rate_limiter.check("global")
     except RateLimitExceeded as e:
-        logger.warning("rate_limited tool=%s key=%s", tool_name, key_fp)
-        return _error_envelope("rate_limited", str(e), retry_after=e.retry_after)
+        logger.warning("rate_limited tool=%s", tool_name)
+        return _envelope("rate_limited", str(e), retry_after=e.retry_after)
     try:
-        result = fn(**kwargs)
-        logger.info(
-            "tool_ok",
-            extra={"tool": tool_name, "key_fp": key_fp, "req_id": req_id},
-        )
+        result = fn()
+        logger.info("tool_ok", extra={"tool": tool_name, "req_id": req_id})
         return result
     except TimeRangeError as e:
-        return _error_envelope("invalid_input", str(e), field="time_range")
-    except ValueError as e:
-        return _error_envelope("invalid_input", str(e))
+        return _envelope("invalid_input", str(e), field="time_range")
     except AlertNotFound as e:
-        return _error_envelope("not_found", str(e))
+        return _envelope("not_found", str(e))
     except WazuhClientError as e:
-        logger.error(
-            "client_error",
-            extra={"tool": tool_name, "req_id": req_id, "code": e.code, "msg": e.message},
-        )
-        return _error_envelope(e.code, e.message)
-    except Exception as e:  # defense in depth
+        code = _classify_client_error(e)
+        if code == "timeout":
+            return _envelope("timeout", e.message,
+                             time_range_hint="try a narrower time_range or reduce top_n")
+        if code == "invalid_query":
+            return _envelope("invalid_query", e.message, hint=_PARSER_HINT)
+        logger.error("client_error",
+                     extra={"tool": tool_name, "req_id": req_id, "code": code})
+        return _envelope(code, e.message)
+    except ValueError as e:  # tool-level validation (e.g., unknown entity_type)
+        return _envelope("invalid_input", str(e))
+    except Exception:  # defense in depth
         logger.exception("internal tool=%s req_id=%s", tool_name, req_id)
-        return _error_envelope("internal", "unexpected error", request_id=req_id)
+        return _envelope("internal", "unexpected error", request_id=req_id)
 
 
-# ---------- Pydantic models (tool input schemas) ----------
+# ---------- App factory ----------
 
-class SearchAlertsInput(BaseModel):
-    time_range: str = Field(..., description="e.g. 'last_24h', 'last_7d', or ISO range 'A/B'")
-    filters: dict[str, Any] | None = Field(default=None)
-    lucene: str | None = Field(default=None)
-    sort_by: Literal["@timestamp", "rule.level"] = "@timestamp"
-    limit: int = Field(default=25, ge=1, le=100)
-
-
-class AggregateAlertsInput(BaseModel):
-    group_by_field: str
-    time_range: str
-    filters: dict[str, Any] | None = None
-    top_n: int = Field(default=10, ge=1, le=50)
-
-
-class AlertOverviewInput(BaseModel):
-    time_range: str
-
-
-class TrendDeltaInput(BaseModel):
-    metric: Literal[
-        "total_alerts", "alerts_by_source", "alerts_by_rule_group",
-        "alerts_by_agent", "threat_intel_hits",
-    ]
-    current_window: str
-    prior_window: str
-    filters: dict[str, Any] | None = None
-    top_n: int = Field(default=10, ge=1, le=50)
-
-
-class ThreatIntelInput(BaseModel):
-    time_range: str
-    list_filter: Literal[
-        "firewalla-c2", "urlhaus", "malware-hashes",
-        "malicious-ip", "malicious-domains", "all",
-    ] = "all"
-
-
-class GetAlertInput(BaseModel):
-    alert_id: str
-
-
-class EntityActivityInput(BaseModel):
-    entity_type: Literal["ip", "agent", "device", "user", "process", "hash", "domain"]
-    entity_value: str
-    time_range: str
-    top_n: int = Field(default=10, ge=1, le=50)
-
-
-def build_app(service: WazuhDataService, api_key: str, rate_limiter: RateLimiter) -> FastMCP:
+def build_app(service: WazuhDataService, rate_limiter: RateLimiter) -> FastMCP:
     app = FastMCP("wazuh-mcp")
 
+    # --- search_alerts ---
     @app.tool(
-        name="search_alerts",
         description=(
-            "Find individual Wazuh alerts matching structured filters or a Lucene "
-            "query. Returns up to `limit` records. " + SOURCES_DESC + " " + COMMON_FIELDS_DESC
+            "Find individual Wazuh alerts matching structured filters or a "
+            "Lucene query. Returns up to `limit` records. "
+            + SOURCES_DESC + " " + COMMON_FIELDS_DESC
         ),
     )
-    def search_alerts(input: SearchAlertsInput) -> dict[str, Any]:
+    def search_alerts(
+        time_range: Annotated[str, Field(
+            description="'last_24h', 'last_7d', 'last_30d', or ISO range 'START/END'")],
+        filters: Annotated[dict[str, Any] | None, Field(
+            description="Structured filters: {field: value} or {field: [values]}. "
+                        "Either `filters` or `lucene` is required.")] = None,
+        lucene: Annotated[str | None, Field(
+            description="Lucene query string. Alternative to `filters`.")] = None,
+        sort_by: Annotated[Literal["@timestamp", "rule.level"], Field()] = "@timestamp",
+        limit: Annotated[int, Field(ge=1, le=100)] = 25,
+    ) -> dict[str, Any]:
         def _call():
             raw = service.search_alerts(
-                time_range=input.time_range,
-                filters=input.filters,
-                lucene=input.lucene,
-                sort_by=input.sort_by,
-                limit=input.limit,
+                time_range=time_range, filters=filters, lucene=lucene,
+                sort_by=sort_by, limit=limit,
             )
-            return cap_results(
-                raw["results"], cap=input.limit, total_matched=raw["total_matched"]
-            )
-        return _wrap("search_alerts", rate_limiter, api_key, _call, {})
+            return cap_results(raw["results"], cap=limit,
+                               total_matched=raw["total_matched"])
+        return _wrap_call("search_alerts", rate_limiter, _call)
 
+    # --- aggregate_alerts ---
     @app.tool(
-        name="aggregate_alerts",
         description=(
             "Group-and-count alerts by any field (e.g. rule.groups, agent.name, "
             "data.source). Returns top-N buckets. " + COMMON_FIELDS_DESC
         ),
     )
-    def aggregate_alerts(input: AggregateAlertsInput) -> dict[str, Any]:
-        return _wrap(
-            "aggregate_alerts", rate_limiter, api_key,
-            service.aggregate_alerts,
-            {"group_by_field": input.group_by_field, "time_range": input.time_range,
-             "filters": input.filters, "top_n": input.top_n},
-        )
+    def aggregate_alerts(
+        group_by_field: Annotated[str, Field(description="Field to group by.")],
+        time_range: Annotated[str, Field()],
+        filters: Annotated[dict[str, Any] | None, Field()] = None,
+        top_n: Annotated[int, Field(ge=1, le=50)] = 10,
+    ) -> dict[str, Any]:
+        return _wrap_call("aggregate_alerts", rate_limiter, lambda: service.aggregate_alerts(
+            group_by_field=group_by_field, time_range=time_range,
+            filters=filters, top_n=top_n,
+        ))
 
+    # --- alert_overview ---
     @app.tool(
-        name="alert_overview",
         description=(
-            "Pre-canned dashboard in JSON: totals, per-source breakdown, "
-            "severity distribution, top rule groups / agents / IPs, threat-intel "
-            "hit count. One call answers 'what's going on?'. " + SOURCES_DESC
+            "Pre-canned dashboard in JSON: totals, per-source breakdown (plus "
+            "an 'unknown' bucket for native OSSEC/syscheck events), severity "
+            "distribution, top rule groups / agents / IPs, threat-intel hit "
+            "count. One call answers 'what's going on?'. " + SOURCES_DESC
         ),
     )
-    def alert_overview(input: AlertOverviewInput) -> dict[str, Any]:
-        return _wrap("alert_overview", rate_limiter, api_key,
-                     service.alert_overview, {"time_range": input.time_range})
+    def alert_overview(
+        time_range: Annotated[str, Field()],
+    ) -> dict[str, Any]:
+        return _wrap_call("alert_overview", rate_limiter,
+                          lambda: service.alert_overview(time_range=time_range))
 
+    # --- trend_delta ---
     @app.tool(
-        name="trend_delta",
         description=(
-            "Compare a metric between two windows to surface trends "
-            "(e.g. 'DNS alerts 3x week-over-week'). Returns current/prior counts "
-            "and top-N movers."
+            "Compare a metric between two windows to surface trends (e.g. "
+            "'DNS alerts 3x week-over-week'). Returns current/prior counts and "
+            "top-N movers."
         ),
     )
-    def trend_delta(input: TrendDeltaInput) -> dict[str, Any]:
-        return _wrap("trend_delta", rate_limiter, api_key, service.trend_delta, {
-            "metric": input.metric, "current_window": input.current_window,
-            "prior_window": input.prior_window, "filters": input.filters,
-            "top_n": input.top_n,
-        })
+    def trend_delta(
+        metric: Annotated[Literal[
+            "total_alerts", "alerts_by_source", "alerts_by_rule_group",
+            "alerts_by_agent", "threat_intel_hits",
+        ], Field()],
+        current_window: Annotated[str, Field()],
+        prior_window: Annotated[str, Field()],
+        filters: Annotated[dict[str, Any] | None, Field()] = None,
+        top_n: Annotated[int, Field(ge=1, le=50)] = 10,
+    ) -> dict[str, Any]:
+        return _wrap_call("trend_delta", rate_limiter, lambda: service.trend_delta(
+            metric=metric, current_window=current_window,
+            prior_window=prior_window, filters=filters, top_n=top_n,
+        ))
 
+    # --- threat_intel_matches ---
     @app.tool(
-        name="threat_intel_matches",
         description=(
             "Return recent threat-intel matches (rules 100450-100453 + built-in "
             "malicious-ioc 99901-99999), joined with source agent and IPs."
         ),
     )
-    def threat_intel_matches(input: ThreatIntelInput) -> dict[str, Any]:
-        return _wrap("threat_intel_matches", rate_limiter, api_key,
-                     service.threat_intel_matches, {
-                         "time_range": input.time_range,
-                         "list_filter": input.list_filter,
-                     })
+    def threat_intel_matches(
+        time_range: Annotated[str, Field()],
+        list_filter: Annotated[Literal[
+            "firewalla-c2", "urlhaus", "malware-hashes",
+            "malicious-ip", "malicious-domains", "all",
+        ], Field()] = "all",
+    ) -> dict[str, Any]:
+        return _wrap_call("threat_intel_matches", rate_limiter,
+                          lambda: service.threat_intel_matches(
+                              time_range=time_range, list_filter=list_filter))
 
+    # --- sidecar_health ---
     @app.tool(
-        name="sidecar_health",
         description=(
             "Report health of data-collection sidecars (msp-poller, threat-intel, "
             "wazuh-mcp itself). Useful when queries return empty or stale data."
         ),
     )
     def sidecar_health() -> dict[str, Any]:
-        return _wrap("sidecar_health", rate_limiter, api_key,
-                     service.sidecar_health, {})
+        return _wrap_call("sidecar_health", rate_limiter, service.sidecar_health)
 
+    # --- get_alert ---
     @app.tool(
-        name="get_alert",
         description="Fetch full detail of one alert by _id. Returns 'not_found' if missing.",
     )
-    def get_alert(input: GetAlertInput) -> dict[str, Any]:
-        return _wrap("get_alert", rate_limiter, api_key,
-                     service.get_alert, {"alert_id": input.alert_id})
+    def get_alert(
+        alert_id: Annotated[str, Field(description="The _id of the alert.")],
+    ) -> dict[str, Any]:
+        return _wrap_call("get_alert", rate_limiter,
+                          lambda: service.get_alert(alert_id=alert_id))
 
+    # --- entity_activity ---
     @app.tool(
-        name="entity_activity",
         description=(
             "Multi-source pivot on one entity. entity_type is one of: "
-            "ip, agent, device, user, process, hash, domain. Returns total count, "
-            "source breakdown, first/last seen, related agents, and 5 recent samples."
+            "ip, agent, device, user, process, hash, domain. Returns total "
+            "count, source breakdown, first/last seen, related agents, and "
+            "5 recent samples."
         ),
     )
-    def entity_activity(input: EntityActivityInput) -> dict[str, Any]:
-        return _wrap("entity_activity", rate_limiter, api_key,
-                     service.entity_activity, {
-                         "entity_type": input.entity_type,
-                         "entity_value": input.entity_value,
-                         "time_range": input.time_range,
-                         "top_n": input.top_n,
-                     })
+    def entity_activity(
+        entity_type: Annotated[Literal[
+            "ip", "agent", "device", "user", "process", "hash", "domain",
+        ], Field()],
+        entity_value: Annotated[str, Field()],
+        time_range: Annotated[str, Field()],
+        top_n: Annotated[int, Field(ge=1, le=50)] = 10,
+    ) -> dict[str, Any]:
+        return _wrap_call("entity_activity", rate_limiter,
+                          lambda: service.entity_activity(
+                              entity_type=entity_type, entity_value=entity_value,
+                              time_range=time_range, top_n=top_n,
+                          ))
 
     return app
 ```
@@ -2638,29 +2987,176 @@ git commit -m "feat(mcp-server): FastMCP app with 8 tool wrappers + error envelo
 
 ---
 
-## Task 16: Entrypoint — main.py that wires it all together
+## Task 16: Entrypoint — main.py with auth middleware
 
 **Files:**
 - Create: `mcp-server/src/main.py`
+- Create: `mcp-server/src/http_app.py`
+- Create: `mcp-server/tests/test_http_app.py`
 
-No unit test here — this is pure wiring (covered by integration tests in Task 19).
+The MCP SSE transport needs bearer-token auth before tool code runs, plus a `/healthz` probe for Docker. Both are handled by a starlette middleware/route stack around the FastMCP SSE app. We put the HTTP wiring in `http_app.py` so it's independently testable.
 
-- [ ] **Step 1: Write `mcp-server/src/main.py`**
+- [ ] **Step 1: Write failing tests for the HTTP app wrapper**
+
+Create `mcp-server/tests/test_http_app.py`:
 
 ```python
-"""Entry point: load config, build services, run FastMCP over HTTP/SSE or stdio."""
+"""Tests for the starlette wrapper: bearer-token auth + /healthz."""
+from unittest.mock import MagicMock
+
+import pytest
+from starlette.testclient import TestClient
+
+from src.http_app import build_http_app
+
+
+@pytest.fixture
+def client():
+    # A minimal inner app (we only care about the middleware + healthz).
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+
+    async def echo(_req):
+        return PlainTextResponse("ok")
+
+    inner = Starlette(routes=[Route("/sse", echo, methods=["GET"])])
+    app = build_http_app(inner_app=inner, api_key="secret")
+    return TestClient(app)
+
+
+def test_healthz_requires_no_auth(client):
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
+def test_sse_without_auth_header_returns_401(client):
+    r = client.get("/sse")
+    assert r.status_code == 401
+
+
+def test_sse_with_wrong_bearer_returns_401(client):
+    r = client.get("/sse", headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401
+
+
+def test_sse_with_correct_bearer_passes_through(client):
+    r = client.get("/sse", headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 200
+    assert r.text == "ok"
+
+
+def test_malformed_authorization_header_returns_401(client):
+    r = client.get("/sse", headers={"Authorization": "Basic abc"})
+    assert r.status_code == 401
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+```bash
+python -m pytest tests/test_http_app.py -v
+```
+
+Expected: ImportError on `src.http_app`.
+
+- [ ] **Step 3: Add `starlette` (transitively available via mcp/fastmcp) and `httpx` to requirements-dev.txt**
+
+```bash
+cd /path/to/firewalla-wazuh/mcp-server
+cat >> requirements-dev.txt <<'EOF'
+httpx>=0.27.0
+EOF
+```
+
+(`starlette` is already pulled in by `mcp`.)
+
+- [ ] **Step 4: Write `mcp-server/src/http_app.py`**
+
+```python
+"""Starlette wrapper: bearer-token auth + /healthz route around the FastMCP SSE app."""
+import hmac
+import logging
+
+from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Mount, Route
+
+logger = logging.getLogger(__name__)
+
+# Paths that bypass auth. /healthz is for Docker; no auth allows us to probe
+# liveness without embedding the secret in the container image.
+_PUBLIC = frozenset({"/healthz"})
+
+
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, api_key: str):
+        super().__init__(app)
+        self._key = api_key
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path in _PUBLIC:
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            logger.warning("auth_missing path=%s", request.url.path)
+            return JSONResponse(
+                {"error": "unauthorized", "message": "missing Bearer token"},
+                status_code=401,
+            )
+        presented = auth[len("Bearer ") :]
+        if not hmac.compare_digest(presented, self._key):
+            logger.warning("auth_bad_key path=%s", request.url.path)
+            return JSONResponse(
+                {"error": "unauthorized", "message": "invalid token"},
+                status_code=401,
+            )
+        return await call_next(request)
+
+
+async def _healthz(_request: Request) -> Response:
+    return JSONResponse({"status": "ok"})
+
+
+def build_http_app(inner_app, api_key: str) -> Starlette:
+    """Wrap the FastMCP SSE Starlette app with auth middleware and /healthz."""
+    app = Starlette(routes=[
+        Route("/healthz", _healthz, methods=["GET"]),
+        Mount("/", app=inner_app),
+    ])
+    app.add_middleware(BearerAuthMiddleware, api_key=api_key)
+    return app
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+```bash
+python -m pytest tests/test_http_app.py -v
+```
+
+Expected: 5 passed.
+
+- [ ] **Step 6: Write `mcp-server/src/main.py`**
+
+```python
+"""Entry point: load config, build services, run MCP SSE (with auth) or stdio."""
 import argparse
 import logging
 from pathlib import Path
 
+import uvicorn
+
 from src.config import load_settings
+from src.http_app import build_http_app
 from src.limits import RateLimiter
 from src.logging_setup import HeartbeatWriter, configure_json_logging
 from src.mcp_server import build_app, startup_self_check
 from src.wazuh_client import WazuhClient
 from src.wazuh_service import WazuhDataService
 
-STATUS_FILE = Path("/var/ossec/logs/sidecar-status/wazuh-mcp.json")
+STATUS_FILE = Path("/var/ossec/logs/sidecar-status/sidecar-status.json")
 ALERTS_INDEX = "wazuh-alerts-*"
 
 logger = logging.getLogger(__name__)
@@ -2674,52 +3170,74 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    configure_json_logging("wazuh-mcp")
+    configure_json_logging()
     settings = load_settings()
 
     client = WazuhClient(
         url=settings.opensearch_url,
         user=settings.os_user,
         password=settings.os_password,
-        timeout=10,
     )
     startup_self_check(client, alerts_index=ALERTS_INDEX)
 
-    status_dir = STATUS_FILE.parent
     service = WazuhDataService(
-        client, alerts_index=ALERTS_INDEX, status_dir=status_dir
+        client, alerts_index=ALERTS_INDEX, status_file=STATUS_FILE,
     )
 
     heartbeat = HeartbeatWriter(
-        component="wazuh-mcp", path=STATUS_FILE, interval=60
+        sidecar="wazuh-mcp",
+        path=STATUS_FILE,
+        interval=60,
+        max_size=settings.max_log_size,
+        max_backups=settings.max_log_backups,
     )
-    heartbeat.record_ok()  # seed file on startup
+    heartbeat._emit_heartbeat()  # seed the stream on startup
     heartbeat.start()
 
     rate_limiter = RateLimiter(
         per_min=settings.rate_limit_per_min, burst=settings.rate_limit_burst
     )
 
-    app = build_app(service=service, api_key=settings.api_key, rate_limiter=rate_limiter)
+    mcp_app = build_app(service=service, rate_limiter=rate_limiter)
 
-    if args.transport == "sse":
-        logger.info("starting SSE on 127.0.0.1:%d", settings.http_port)
-        app.run(transport="sse", host="127.0.0.1", port=settings.http_port)
-    else:
+    if args.transport == "stdio":
         logger.info("starting stdio transport")
-        app.run(transport="stdio")
+        mcp_app.run(transport="stdio")
+        return
+
+    # HTTP/SSE: wrap the FastMCP SSE app with auth + /healthz, run via uvicorn.
+    sse_app = mcp_app.sse_app()
+    http_app = build_http_app(inner_app=sse_app, api_key=settings.api_key)
+    logger.info("starting SSE on 127.0.0.1:%d", settings.http_port)
+    uvicorn.run(
+        http_app,
+        host="127.0.0.1",
+        port=settings.http_port,
+        log_config=None,   # don't override our JSON logger
+    )
 
 
 if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Commit**
+- [ ] **Step 7: Add `uvicorn` to `requirements.txt`**
+
+```bash
+cd /path/to/firewalla-wazuh/mcp-server
+cat >> requirements.txt <<'EOF'
+uvicorn>=0.30.0
+EOF
+```
+
+- [ ] **Step 8: Commit**
 
 ```bash
 cd /path/to/firewalla-wazuh
-git add mcp-server/src/main.py
-git commit -m "feat(mcp-server): main.py entrypoint with --transport flag"
+git add mcp-server/src/main.py mcp-server/src/http_app.py \
+        mcp-server/tests/test_http_app.py \
+        mcp-server/requirements.txt mcp-server/requirements-dev.txt
+git commit -m "feat(mcp-server): main.py with bearer-auth middleware and /healthz"
 ```
 
 ---
@@ -2756,9 +3274,12 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8800
 CMD ["python", "-m", "src.main", "--transport", "sse"]
 
+# /healthz is a plain JSON 200 endpoint with no auth — safe to probe from
+# the Docker healthcheck without embedding the API key. --max-time 3 prevents
+# hangs if the server is stuck.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -sf -H "Authorization: Bearer ${MCP_API_KEY}" \
-        http://127.0.0.1:${MCP_HTTP_PORT:-8800}/sse || exit 1
+    CMD curl -sf --max-time 3 \
+        http://127.0.0.1:${MCP_HTTP_PORT:-8800}/healthz || exit 1
 ```
 
 - [ ] **Step 2: Smoke-build locally to verify syntax**
@@ -2814,7 +3335,7 @@ curl -sS "${auth[@]}" -X PUT \
     -d '{
         "cluster_permissions": ["cluster_composite_ops_ro"],
         "index_permissions": [{
-            "index_patterns": ["wazuh-alerts-*", "wazuh-monitoring-*"],
+            "index_patterns": ["wazuh-alerts-*"],
             "allowed_actions": ["read", "search", "indices:data/read/*", "indices:admin/get"]
         }]
     }' \
@@ -2987,17 +3508,19 @@ OS_URL = os.environ.get("TEST_OS_URL", "http://localhost:19200")
 
 @pytest.fixture(scope="module")
 def service():
-    # wait for opensearch to be up
+    # Wait for opensearch to be up. We use httpx (already a dev dep) to avoid
+    # pulling in the full requests package.
+    import httpx
     for _ in range(30):
         try:
-            import requests
-            if requests.get(OS_URL).status_code == 200:
+            if httpx.get(OS_URL, timeout=2).status_code == 200:
                 break
         except Exception:
             time.sleep(1)
     seed(OS_URL, 500)
-    client = WazuhClient(url=OS_URL, user="", password="", timeout=10)
-    # override: when security is disabled, http_auth is ignored
+    # When security is disabled on the test OS, the client passes http_auth=None
+    # (user="" triggers the no-auth branch in WazuhClient).
+    client = WazuhClient(url=OS_URL, user="", password="")
     return WazuhDataService(client, alerts_index="wazuh-alerts-*")
 
 
@@ -3023,8 +3546,10 @@ def test_aggregate_alerts_end_to_end(service):
 @pytest.mark.integration
 def test_alert_overview_end_to_end(service):
     out = service.alert_overview(time_range="last_7d")
-    assert out["total_alerts"] == 500
-    assert sum(out["by_source"].values()) == 500
+    # Not an exact 500: `now-7d/d` rounds to the day boundary, so a few
+    # seed records near the edge may fall in or out of scope. Tolerate ±10.
+    assert out["total_alerts"] >= 490
+    assert sum(out["by_source"].values()) == out["total_alerts"]
 
 
 @pytest.mark.integration
@@ -3298,14 +3823,30 @@ docker logs single-node-wazuh-mcp --tail 20
 # expect: JSON log line "starting SSE on 127.0.0.1:8800"
 ```
 
-- [ ] **Step 6: Probe HTTP endpoint**
+- [ ] **Step 6: Probe HTTP endpoints**
+
+Unauth /healthz (safe, no key needed):
 
 ```bash
-curl -sf -H "Authorization: Bearer $MCP_API_KEY" \
-    http://127.0.0.1:8800/sse | head -5
+curl -sf --max-time 3 http://127.0.0.1:8800/healthz
+# expected: {"status":"ok"}
 ```
 
-Expected: SSE stream (headers + events starting to flow).
+Auth /sse with the API key (should receive SSE headers before blocking):
+
+```bash
+curl -sv --max-time 3 -H "Authorization: Bearer $MCP_API_KEY" \
+    http://127.0.0.1:8800/sse 2>&1 | grep -E "^(< HTTP|< content-type)" | head -3
+# expected: HTTP/1.1 200 OK + content-type: text/event-stream
+```
+
+Auth failure path (should be 401):
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" --max-time 3 \
+    -H "Authorization: Bearer wrong" http://127.0.0.1:8800/sse
+# expected: 401
+```
 
 - [ ] **Step 7: Configure Claude Code to use the server**
 
@@ -3354,17 +3895,17 @@ git push origin main
 
 ---
 
-## Self-Review Checklist (done by plan author)
+## Self-Review Checklist (done by plan author, updated post-review)
 
 **Spec coverage:**
 
 - [x] Architecture (sidecar, stateless, bearer-token auth, read-only user): Tasks 17, 18, 20, 22.
-- [x] Components (config, client, service, mcp_server, limits, logging_setup): Tasks 2-5, 15, 16.
-- [x] Data flow (request path with auth → rate limit → Pydantic → service → cap): covered by the `_wrap` helper in Task 15.
-- [x] All 8 tools with input/output shapes: Tasks 7-14 (service) + Task 15 (MCP wrappers).
-- [x] Error envelope (opensearch_unavailable, invalid_query, timeout, rate_limited, invalid_input, not_found, internal): Task 3 (client errors), Task 15 (`_wrap`).
-- [x] Hard limits (100 results/call, 50 buckets, 10s timeout, 60/min rate limit, 90-day span): Tasks 3, 4, 6, 7, 8.
-- [x] Observability (per-call JSON log, heartbeat, startup self-check): Tasks 5, 15, 16.
+- [x] Components (config, client, service, mcp_server, http_app, limits, logging_setup): Tasks 2-5, 15, 16.
+- [x] Data flow (request path with auth → rate limit → service → cap): Task 16 (auth middleware) → Task 15 (`_wrap_call`).
+- [x] All 8 tools with input/output shapes: Tasks 7-14 (service) + Task 15 (MCP wrappers with individual `Annotated[...]` args).
+- [x] Error envelope (opensearch_unavailable, invalid_query, timeout, rate_limited, invalid_input, not_found, internal): Task 3 (client `timeout` code), Task 15 (`_wrap_call` + `_classify_client_error`).
+- [x] Hard limits (100 results/call, 50 buckets, 10s wall-clock across retries, 60/min rate limit, 90-day span): Tasks 3 (deadline), 4 (rate), 6 (span), 7-8 (caps).
+- [x] Observability (per-call JSON log, heartbeat as JSONL, startup self-check): Tasks 5, 15, 16.
 - [x] Testing layers (unit, integration, manual smoke): Tasks 2-15 (unit), 19 (integration), 21 (smoke).
 - [x] Operational (secrets, git workflow, log rotation, user provisioning): Tasks 1, 18, 22.
 
@@ -3373,10 +3914,27 @@ git push origin main
 **Type/name consistency:**
 - `WazuhClient.search` / `.count` / `.ping` — consistent Task 3 → 15 → 19.
 - `WazuhDataService` method names match between service tasks (7-14), wrapper task (15), and integration tests (19).
-- Field `data.source` used consistently in alert_overview, trend_delta metric `alerts_by_source`, entity_activity breakdown.
-- `HeartbeatWriter` API (`record_ok`, `record_error`, `start`, `_flush`) consistent between Task 5 and Task 16.
+- `HeartbeatWriter(sidecar=…, path=…)` consistent between Task 5 and Task 16.
+- `WazuhDataService(..., status_file=…)` (file, not dir) consistent between Task 12 and Task 16.
+- `build_app(service, rate_limiter)` — no `api_key` arg; auth is enforced at the HTTP layer (`build_http_app`).
 
-Plan is internally consistent.
+**Review remediation log (what changed post-review, 2026-04-24):**
+- **BLOCKER** — Bearer-token auth now enforced via `BearerAuthMiddleware` in `src/http_app.py` (new file), added around the FastMCP SSE app in `main.py`. Tasks 15 + 16.
+- **BLOCKER** — Tool signatures rewritten to individual `Annotated[T, Field(...)]` arguments instead of single Pydantic-model wrappers, so MCP clients see a flat schema. Task 15.
+- **BLOCKER** — `WazuhClient` now enforces a wall-clock deadline across the one retry (`_call_with_retry`) and raises `WazuhClientError(code="timeout")` when exceeded. `_wrap_call` emits the `timeout` envelope per spec. Tasks 3 + 15.
+- **BLOCKER (CLARIFIED)** — Reviewer flagged `app.run(transport="sse", host=..., port=...)` as wrong signature; web docs confirmed it is valid. We still switched main.py to build `sse_app()` + uvicorn manually so we can mount the auth middleware. Task 16.
+- **MAJOR** — Heartbeat writer rewritten to append JSONL events to the shared `/var/ossec/logs/sidecar-status/sidecar-status.json` stream (matching existing msp-poller / threat-intel convention), rather than writing a per-component file. `sidecar_health` rewritten to tail-read the stream and group by `sidecar` name. Tasks 5 + 12.
+- **MAJOR** — Dockerfile healthcheck switched from `/sse` (SSE stream, hangs) to `/healthz` (plain JSON, no auth required). Task 17.
+- **MAJOR** — `get_alert` now uses `{"ids": {"values": [...]}}` instead of the deprecated `{"term": {"_id": ...}}`. Task 13.
+- **MAJOR** — `wazuh-monitoring-*` dropped from the `mcp_read` role (least-privilege; no tool queries it). Task 18.
+- **MAJOR** — `data.source` fallback documented in `alert_overview` (OSSEC/syscheck events appear in "unknown" bucket; users pair with `rule.groups`). Tool description for `alert_overview` makes this visible to the LLM. Tasks 9 + 15.
+- **MAJOR** — Time-brittle sidecar-health tests now monkeypatch `src.wazuh_service.time.time`; integration `test_alert_overview_end_to_end` tolerates ±10 records around the 7-day boundary. Tasks 12 + 19.
+- **MAJOR** — `requests` swapped to `httpx` (already in dev deps) in integration tests; `WazuhClient` passes `http_auth=None` when user is empty, unblocking security-disabled test mode. Tasks 3 + 19.
+- **MINOR** — `invalid_query` envelope produced by sniffing OpenSearch parser errors in `_classify_client_error`. Task 15.
+- **MINOR** — Dead `if not url.startswith("https") or True:` branch removed; `JsonFormatter` skip-list adds `taskName` (Python 3.12). Tasks 3 + 5.
+- **MINOR** — `configure_json_logging` dropped the unused `service` parameter. Task 5.
+
+Plan is internally consistent after patches.
 
 ---
 
