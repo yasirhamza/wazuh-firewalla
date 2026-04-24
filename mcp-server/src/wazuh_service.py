@@ -1,7 +1,14 @@
 """Domain logic for Wazuh SIEM queries. No MCP imports — reusable by any UI."""
+import json
+import time as _time
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from src.time_range import parse_time_range
+
+# Module-level alias so tests can monkeypatch src.wazuh_service.time.
+time = _time
 
 
 ALERTS_INDEX_DEFAULT = "wazuh-alerts-*"
@@ -11,9 +18,15 @@ HARD_RESULT_CAP = 100
 class WazuhDataService:
     """One public method per MCP tool. Stateless."""
 
-    def __init__(self, client, alerts_index: str = ALERTS_INDEX_DEFAULT):
+    def __init__(
+        self,
+        client,
+        alerts_index: str = ALERTS_INDEX_DEFAULT,
+        status_file: Path | None = None,
+    ):
         self._client = client
         self._alerts_index = alerts_index
+        self._status_file = Path(status_file) if status_file else None
 
     # ---------- helpers ----------
 
@@ -304,3 +317,86 @@ class WazuhDataService:
                 "rule_id": src.get("rule", {}).get("id"),
             })
         return {"matches": matches, "total": resp["hits"]["total"]["value"]}
+
+    _STALE_SECONDS = 300  # 5 min; spec §5 says >5min stale triggers rule 100504
+
+    # Read up to this many trailing bytes — enough to cover many minutes of
+    # heartbeats even in a busy stream.
+    _TAIL_BYTES = 256 * 1024
+
+    def sidecar_health(self) -> dict[str, Any]:
+        now = time.time()
+        latest: dict[str, dict[str, Any]] = {}
+
+        if self._status_file and self._status_file.exists():
+            data = self._tail_read(self._status_file, self._TAIL_BYTES)
+            for line in data.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                name = ev.get("sidecar") or ev.get("component")
+                if not name:
+                    continue
+                prev = latest.get(name)
+                # Keep whichever event is newer for this sidecar.
+                if prev is None or ev.get("timestamp", "") >= prev.get("timestamp", ""):
+                    latest[name] = ev
+
+        sidecars: list[dict[str, Any]] = []
+        for name in sorted(latest):
+            ev = latest[name]
+            stats = ev.get("stats") or {}
+            last_hb = ev.get("timestamp")
+            stale = self._is_stale(last_hb, now)
+            status = "stale" if stale else ev.get("sync_status", "unknown")
+            sidecars.append({
+                "name": name,
+                "status": status,
+                "last_heartbeat": last_hb,
+                "error_count_10m": stats.get("error_count_10m", 0),
+                "last_error": stats.get("last_error") or ev.get("error_message"),
+            })
+        ok = sum(1 for s in sidecars if s["status"] in ("running", "success"))
+        err = sum(1 for s in sidecars if s["status"] in ("error", "stale"))
+        return {
+            "sidecars": sidecars,
+            "summary": {
+                "count_ok": ok,
+                "count_error": err,
+                "any_errors": err > 0,
+            },
+        }
+
+    @staticmethod
+    def _tail_read(path: Path, n: int) -> str:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            start = max(0, size - n)
+            f.seek(start)
+            data = f.read()
+        # Drop the first (possibly partial) line if we didn't start at byte 0.
+        text = data.decode("utf-8", errors="replace")
+        if start > 0:
+            nl = text.find("\n")
+            text = text[nl + 1 :] if nl >= 0 else ""
+        return text
+
+    @staticmethod
+    def _is_stale(last_hb: str | None, now: float) -> bool:
+        if not last_hb:
+            return True
+        try:
+            # Accept both "2026-04-24T10:00:00" and "...Z" forms.
+            dt = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
+            # Naive timestamps: assume UTC (matches HeartbeatWriter).
+            if dt.tzinfo is None:
+                from datetime import timezone
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (now - dt.timestamp()) > WazuhDataService._STALE_SECONDS
+        except ValueError:
+            return True
