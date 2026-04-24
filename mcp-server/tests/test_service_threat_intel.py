@@ -20,7 +20,7 @@ def _hit(rule_id, ioc="198.51.100.10", list_name="firewalla-c2"):
     }
 
 
-def test_threat_intel_matches_queries_both_rule_ranges():
+def test_threat_intel_matches_enumerates_custom_and_ioc_rule_ids():
     client = MagicMock()
     client.search.return_value = {
         "hits": {"total": {"value": 2}, "hits": [_hit("100450"), _hit("99901")]}
@@ -28,12 +28,12 @@ def test_threat_intel_matches_queries_both_rule_ranges():
     svc = WazuhDataService(client)
     out = svc.threat_intel_matches(time_range="last_24h")
     body = client.search.call_args.kwargs["body"]
-    # filter should OR the two rule sources
-    should = body["query"]["bool"]["filter"][-1]["bool"]["should"]
-    terms = [s for s in should if "terms" in s][0]["terms"]["rule.id"]
-    assert {"100450", "100451", "100452", "100453"}.issubset(set(terms))
-    rng = [s for s in should if "range" in s][0]["range"]["rule.id"]
-    assert rng == {"gte": "99901", "lte": "99999"}
+    # Last filter clause is a terms query over both custom (100450-100453) and
+    # built-in malicious-ioc (99901-99999) rule IDs. Keyword ranges are
+    # deliberately avoided — see _TI_ALL_RULE_IDS in wazuh_service.
+    rule_ids = body["query"]["bool"]["filter"][-1]["terms"]["rule.id"]
+    assert {"100450", "100451", "100452", "100453"}.issubset(set(rule_ids))
+    assert {"99901", "99950", "99999"}.issubset(set(rule_ids))
     assert out["total"] == 2
     assert len(out["matches"]) == 2
 

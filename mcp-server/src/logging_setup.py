@@ -145,10 +145,13 @@ class HeartbeatWriter:
         })
 
     def _append_event(self, event: dict[str, Any]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._rotate_if_needed()
-        with open(self._path, "a") as f:
-            f.write(json.dumps(event) + "\n")
+        # Serialize rotate + append: concurrent heartbeat-thread + error-path
+        # writes must not interleave with a rename() on rotation.
+        with self._lock:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._rotate_if_needed()
+            with open(self._path, "a") as f:
+                f.write(json.dumps(event) + "\n")
 
     def _rotate_if_needed(self) -> None:
         if not self._path.exists() or self._path.stat().st_size < self._max_size:

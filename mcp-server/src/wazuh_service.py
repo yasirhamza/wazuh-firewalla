@@ -14,9 +14,24 @@ time = _time
 ALERTS_INDEX_DEFAULT = "wazuh-alerts-*"
 HARD_RESULT_CAP = 100
 
+# Threat-intel rule ID buckets.
+#
+# Custom: our sidecar-populated matches. Built-in: the malicious-ioc lists
+# shipped with Wazuh (rules 99901-99999). We enumerate both as explicit `terms`
+# rather than using a range query — `rule.id` is a keyword field, and
+# keyword-range does lexicographic comparison, which is fragile across
+# OpenSearch versions.
+_TI_RULE_IDS_CUSTOM = ["100450", "100451", "100452", "100453"]
+_TI_RULE_IDS_IOC = [str(i) for i in range(99901, 100000)]
+_TI_ALL_RULE_IDS = _TI_RULE_IDS_CUSTOM + _TI_RULE_IDS_IOC
+
 
 class AlertNotFound(LookupError):
     """Raised when get_alert cannot find the requested alert_id."""
+
+    def __init__(self, alert_id: str):
+        self.alert_id = alert_id
+        super().__init__(f"alert {alert_id!r} not found")
 
 
 class WazuhDataService:
@@ -152,14 +167,7 @@ class WazuhDataService:
                 "top_src_ips": {"terms": {"field": "data.srcip", "size": 10}},
                 "top_dst_ips": {"terms": {"field": "data.dstip", "size": 10}},
                 "threat_intel_hits": {
-                    "filter": {
-                        "bool": {
-                            "should": [
-                                {"terms": {"rule.id": ["100450", "100451", "100452", "100453"]}},
-                                {"range": {"rule.id": {"gte": "99901", "lte": "99999"}}},
-                            ]
-                        }
-                    }
+                    "filter": {"terms": {"rule.id": _TI_ALL_RULE_IDS}}
                 },
             },
             "track_total_hits": True,
@@ -213,12 +221,7 @@ class WazuhDataService:
         """Return (total, groups). Groups is [] when metric has no group field."""
         clauses = self._build_filter_clauses(filters, time_range)
         if metric == "threat_intel_hits":
-            clauses.append({
-                "bool": {"should": [
-                    {"terms": {"rule.id": ["100450", "100451", "100452", "100453"]}},
-                    {"range": {"rule.id": {"gte": "99901", "lte": "99999"}}},
-                ]}
-            })
+            clauses.append({"terms": {"rule.id": _TI_ALL_RULE_IDS}})
         body: dict[str, Any] = {
             "size": 0,
             "query": {"bool": {"filter": clauses}},
@@ -288,16 +291,10 @@ class WazuhDataService:
         list_filter: str = "all",
         top_n: int = 100,
     ) -> dict[str, Any]:
-        ti_filter = {
-            "bool": {"should": [
-                {"terms": {"rule.id": ["100450", "100451", "100452", "100453"]}},
-                {"range": {"rule.id": {"gte": "99901", "lte": "99999"}}},
-            ]}
-        }
         clauses = self._build_filter_clauses(None, time_range)
         if list_filter and list_filter != "all":
             clauses.append({"term": {"data.threat_intel.list": list_filter}})
-        clauses.append(ti_filter)
+        clauses.append({"terms": {"rule.id": _TI_ALL_RULE_IDS}})
 
         body = {
             "size": min(top_n, HARD_RESULT_CAP),
