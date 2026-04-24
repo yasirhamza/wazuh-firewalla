@@ -363,7 +363,9 @@ def test_search_retries_once_on_connection_error():
     client, mock_os = make_client()
     from opensearchpy import ConnectionError
 
-    mock_os.search.side_effect = [ConnectionError("boom"), {"hits": {"total": {"value": 1}, "hits": []}}]
+    # opensearchpy's exception classes require at least `(status, error, info)`
+    # — a single-arg constructor will IndexError inside the library's __str__.
+    mock_os.search.side_effect = [ConnectionError("N/A", "boom", {}), {"hits": {"total": {"value": 1}, "hits": []}}]
 
     result = client.search(index="wazuh-alerts-*", body={})
 
@@ -375,7 +377,7 @@ def test_search_raises_after_retry_exhausted():
     client, mock_os = make_client()
     from opensearchpy import ConnectionError
 
-    mock_os.search.side_effect = ConnectionError("still dead")
+    mock_os.search.side_effect = ConnectionError("N/A", "still dead", {})
 
     with pytest.raises(WazuhClientError, match="opensearch_unavailable"):
         client.search(index="wazuh-alerts-*", body={})
@@ -394,7 +396,7 @@ def test_search_raises_timeout_when_deadline_exceeded(monkeypatch):
 
     def fail_and_advance(*a, **kw):
         t[0] += 11.0
-        raise ConnectionError("slow")
+        raise ConnectionError("N/A", "slow", {})
 
     mock_os.search.side_effect = fail_and_advance
     with pytest.raises(WazuhClientError, match="timeout"):
@@ -2051,7 +2053,8 @@ def _error(sidecar: str, ts: str, message: str) -> dict:
 
 def test_sidecar_health_reports_latest_per_sidecar(tmp_path: Path, monkeypatch):
     # Freeze "now" at 2026-04-24T10:05:00Z — same moment as the latest events.
-    monkeypatch.setattr("src.wazuh_service.time.time", lambda: 1777629900.0)
+    # (1777025100 == 2026-04-24T10:05:00Z; don't compute by hand.)
+    monkeypatch.setattr("src.wazuh_service.time.time", lambda: 1777025100.0)
     stream = tmp_path / "sidecar-status.json"
     _append(stream, _heartbeat("msp-poller",  "2026-04-24T10:03:00"))
     _append(stream, _heartbeat("threat-intel", "2026-04-24T10:04:00"))
@@ -2072,8 +2075,8 @@ def test_sidecar_health_reports_latest_per_sidecar(tmp_path: Path, monkeypatch):
 
 
 def test_sidecar_health_flags_stale_heartbeat(tmp_path: Path, monkeypatch):
-    # Freeze "now" to +10 min past the only heartbeat.
-    monkeypatch.setattr("src.wazuh_service.time.time", lambda: 1777630200.0)  # 2026-04-24T10:10:00Z
+    # Freeze "now" to +10 min past the only heartbeat (2026-04-24T10:10:00Z).
+    monkeypatch.setattr("src.wazuh_service.time.time", lambda: 1777025400.0)
     stream = tmp_path / "sidecar-status.json"
     _append(stream, _heartbeat("msp-poller", "2026-04-24T10:00:00"))
 
@@ -2592,17 +2595,19 @@ from src.wazuh_client import WazuhClientError
 from src.wazuh_service import AlertNotFound
 
 
-def test_startup_self_check_succeeds_when_ping_and_query_pass():
+def test_startup_self_check_succeeds_when_count_works():
     client = MagicMock()
-    client.ping.return_value = True
     client.count.return_value = 0
     startup_self_check(client, alerts_index="wazuh-alerts-*")  # no raise
 
 
-def test_startup_self_check_fails_on_ping_false():
+def test_startup_self_check_fails_when_count_raises():
+    # Don't use ping: the `mcp_read` OpenSearch role is scoped to
+    # `wazuh-alerts-*` and doesn't grant the cluster-level HEAD / that
+    # client.ping() requires. A successful count subsumes connectivity.
     client = MagicMock()
-    client.ping.return_value = False
-    with pytest.raises(RuntimeError, match="ping"):
+    client.count.side_effect = RuntimeError("network down")
+    with pytest.raises(RuntimeError, match="self-check failed"):
         startup_self_check(client, alerts_index="wazuh-alerts-*")
 
 
@@ -2736,8 +2741,10 @@ COMMON_FIELDS_DESC = (
 
 
 def startup_self_check(client, alerts_index: str) -> None:
-    if not client.ping():
-        raise RuntimeError("OpenSearch ping failed at startup")
+    # A successful count subsumes connectivity — and the `mcp_read` OpenSearch
+    # role is scoped to `wazuh-alerts-*`, so the cluster-level HEAD / that
+    # `client.ping()` uses is forbidden by design. Count is the real capability
+    # check anyway.
     try:
         client.count(index=alerts_index, body={"query": {"match_all": {}}})
     except Exception as e:
@@ -3206,12 +3213,16 @@ def main() -> None:
         return
 
     # HTTP/SSE: wrap the FastMCP SSE app with auth + /healthz, run via uvicorn.
+    # Bind to 0.0.0.0 INSIDE the container — host-side localhost-only exposure
+    # is enforced by the docker-compose `ports: 127.0.0.1:PORT:PORT` mapping.
+    # Binding to 127.0.0.1 inside the container would reject Docker-routed
+    # traffic from the host (arrives on eth0, not loopback).
     sse_app = mcp_app.sse_app()
     http_app = build_http_app(inner_app=sse_app, api_key=settings.api_key)
-    logger.info("starting SSE on 127.0.0.1:%d", settings.http_port)
+    logger.info("starting SSE on 0.0.0.0:%d (host-exposed as 127.0.0.1)", settings.http_port)
     uvicorn.run(
         http_app,
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=settings.http_port,
         log_config=None,   # don't override our JSON logger
     )
@@ -3935,6 +3946,13 @@ git push origin main
 - **MINOR** — `configure_json_logging` dropped the unused `service` parameter. Task 5.
 
 Plan is internally consistent after patches.
+
+**Live-deploy patches (added 2026-04-24 after first end-to-end run):**
+
+- **Task 3** — `opensearchpy.ConnectionError` requires at least `(status, error, info)`; a single-string constructor raises `IndexError` inside the library's `__str__`. All three test sites now pass `("N/A", "msg", {})`.
+- **Task 12** — fake `time.time()` values were off by a week (`1777629900` = 2026-05-01). Corrected to `1777025100` and `1777025400` (actual 2026-04-24 epoch seconds).
+- **Task 15** — `startup_self_check` previously called `client.ping()` first, but the `mcp_read` OpenSearch role is scoped to `wazuh-alerts-*` and does not grant cluster-level `HEAD /` (returns 403). Dropped the ping step; the count probe already proves connectivity. Tests updated.
+- **Task 16** — `uvicorn.run(host="127.0.0.1", ...)` inside the container rejects all Docker-routed traffic (arrives on `eth0`, not loopback), so host-side `curl` hung with "connection reset". Bind to `0.0.0.0` inside the container; host-side localhost-only exposure is already enforced by the compose `ports: 127.0.0.1:PORT:PORT` mapping.
 
 ---
 
