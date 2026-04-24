@@ -15,6 +15,10 @@ ALERTS_INDEX_DEFAULT = "wazuh-alerts-*"
 HARD_RESULT_CAP = 100
 
 
+class AlertNotFound(LookupError):
+    """Raised when get_alert cannot find the requested alert_id."""
+
+
 class WazuhDataService:
     """One public method per MCP tool. Stateless."""
 
@@ -400,3 +404,18 @@ class WazuhDataService:
             return (now - dt.timestamp()) > WazuhDataService._STALE_SECONDS
         except ValueError:
             return True
+
+    def get_alert(self, alert_id: str) -> dict[str, Any]:
+        # Use the `ids` query, not `term: _id` — the latter is deprecated and
+        # will fail on newer OpenSearch versions.
+        resp = self._client.search(
+            index=self._alerts_index,
+            body={
+                "size": 1,
+                "query": {"ids": {"values": [alert_id]}},
+            },
+        )
+        hits = resp["hits"]["hits"]
+        if not hits:
+            raise AlertNotFound(alert_id)
+        return {"_id": hits[0]["_id"], **hits[0]["_source"]}
