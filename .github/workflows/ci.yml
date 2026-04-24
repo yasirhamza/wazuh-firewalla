@@ -7,6 +7,17 @@ on:
     branches: [main]
 
 jobs:
+  sensitive-strings:
+    name: Sensitive-String Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Scan repo for real identifiers
+        run: python3 scripts/check_sensitive.py
+
   lint:
     name: Lint & Validate
     runs-on: ubuntu-latest

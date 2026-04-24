@@ -24,13 +24,21 @@ Thank you for your interest in contributing! This document provides guidelines f
    # Edit .env with your credentials
    ```
 
-3. Start the stack:
+3. Activate the pre-commit hook (blocks commits containing real hostnames,
+   internal IPs, or personal identifiers):
+   ```bash
+   git config core.hooksPath .githooks
+   ```
+   The same check runs in CI via the `sensitive-strings` job. To see what's
+   blocked or to add a new rule, edit `scripts/check_sensitive.py`.
+
+4. Start the stack:
    ```bash
    docker compose -f generate-certs.yml run --rm generator
    docker compose up -d
    ```
 
-4. Run tests:
+5. Run tests:
    ```bash
    cd tests
    ./scripts/run_integration_tests.sh

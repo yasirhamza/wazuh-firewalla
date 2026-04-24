@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Pre-commit hook: block commits that would leak real identifiers.
+# Activate once per clone with:
+#     git config core.hooksPath .githooks
+set -euo pipefail
+python3 "$(git rev-parse --show-toplevel)/scripts/check_sensitive.py" --staged

@@ -20,17 +20,17 @@ def test_enumerate_devices_returns_sorted_unique_device_names():
     client = MagicMock()
     client.search.return_value = {
         "aggregations": {"devices": {"buckets": [
-            {"key": "demo-device", "doc_count": 2498},
-            {"key": "laptop-1", "doc_count": 305},
+            {"key": "host-a", "doc_count": 2498},
+            {"key": "host-b", "doc_count": 305},
             {"key": "host-c", "doc_count": 337},
-            {"key": "iPhone", "doc_count": 109},
+            {"key": "host-d", "doc_count": 109},
         ]}}
     }
     svc = WazuhDataService(client)
 
     devices = svc.enumerate_devices(time_range="last_30d")
 
-    assert devices == sorted(["demo-device", "laptop-1", "host-c", "iPhone"])
+    assert devices == sorted(["host-a", "host-b", "host-c", "host-d"])
     body = client.search.call_args.kwargs["body"]
     filters = body["query"]["bool"]["filter"]
     assert {"term": {"data.event_type": "alarm"}} in filters

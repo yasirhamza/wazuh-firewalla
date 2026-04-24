@@ -285,7 +285,7 @@ def build_app(service: WazuhDataService, rate_limiter: RateLimiter) -> FastMCP:
     )
     def first_seen_domains(
         device_name: Annotated[str, Field(
-            description="Firewalla device name (e.g. 'kids-laptop', 'laptop-1', 'Kids iPad').")],
+            description="Firewalla device name (e.g. 'kids-laptop', 'laptop-1', 'living-room-ipad').")],
         recent_window: Annotated[str, Field(
             description="Shorthand window (e.g. 'last_7d').")] = "last_7d",
         baseline_days: Annotated[int, Field(ge=7, le=180)] = 90,

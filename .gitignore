@@ -69,3 +69,78 @@ claude.md
 .venv
 __pycache__/
 *.pyc
+
+# ===========================================
+# Python Build / Test Artifacts
+# ===========================================
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.hypothesis/
+
+# ===========================================
+# Backup / Scratch Files
+# ===========================================
+*.bak
+*.backup
+*.orig
+*.rej
+*.tmp
+tmp/
+scratch/
+notes-local.md
+
+# ===========================================
+# Data Exports / Investigation Dumps
+# ===========================================
+# Never commit actual alert data, device lists, or sidecar state — these
+# contain real hostnames, IPs, and domain contacts.
+*-alerts.json
+*-alerts.ndjson
+*-events.json
+*-events.ndjson
+*-export.json
+*-export.ndjson
+*-report.json
+*-report.ndjson
+*-dump.json
+*-snapshot.json
+sidecar-status.json
+sidecar-status.json.*
+last_alarm_ts.txt
+last_flow_ts.txt
+
+# ===========================================
+# Wazuh / OpenSearch Runtime State
+# ===========================================
+# Mounted docker volumes or host-side copies of container paths
+volumes/
+wazuh-data/
+opensearch-data/
+filebeat-data/
+
+# ===========================================
+# OpenSearch Snapshot Repositories
+# ===========================================
+snapshots/
+*.snap
+
+# ===========================================
+# Misc Local Config
+# ===========================================
+.direnv/
+.envrc
+.cursorrules
+.aider*
