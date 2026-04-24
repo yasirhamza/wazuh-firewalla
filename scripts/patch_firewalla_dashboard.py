@@ -47,6 +47,9 @@ ADD_VIZ_TITLE = "Firewalla: ALARM_INTEL rate by device"
 FIRST_SEEN_VIZ_ID = "firewalla-first-seen-domains"
 FIRST_SEEN_VIZ_TITLE = "First-seen domains per device"
 
+FIRST_SEEN_TABLE_ID = "firewalla-first-seen-snapshot"
+FIRST_SEEN_TABLE_TITLE = "First-seen domains — latest scan snapshot"
+
 DASHBOARD_ID = "firewalla-security-dashboard"
 INDEX_PATTERN_ID = "wazuh-alerts-*"
 
@@ -319,6 +322,134 @@ def _first_seen_by_device_viz() -> dict:
     }
 
 
+def _first_seen_snapshot_table() -> dict:
+    """Data-table: latest scan's new_domain_count + domain list per device.
+
+    Complement to the time-series panel. Immediately actionable — each
+    device appears once with its most-recent scan's new-domain count and
+    the actual domain names (top_hits, sorted by @timestamp desc).
+    Useful on day 1 when the time-series still has a single data point.
+    """
+    vis_state = {
+        "title": FIRST_SEEN_TABLE_TITLE,
+        "type": "table",
+        "aggs": [
+            # Metric #1: the latest scan's new_domain_count per device.
+            # top_hits of the numeric field with size=1 sorted by @timestamp desc
+            # gives exactly the most recent value, even if multiple scans are
+            # in the time range.
+            {
+                "id": "1",
+                "enabled": True,
+                "type": "top_hits",
+                "params": {
+                    "field": "data.new_domain_count",
+                    "aggregate": "concat",
+                    "size": 1,
+                    "sortField": "@timestamp",
+                    "sortOrder": "desc",
+                },
+                "schema": "metric",
+            },
+            # Metric #2: the actual new-domains list from that same latest scan.
+            {
+                "id": "2",
+                "enabled": True,
+                "type": "top_hits",
+                "params": {
+                    "field": "data.new_domains",
+                    "aggregate": "concat",
+                    "size": 1,
+                    "sortField": "@timestamp",
+                    "sortOrder": "desc",
+                },
+                "schema": "metric",
+            },
+            # Metric #3: when the latest scan ran (for freshness awareness).
+            {
+                "id": "3",
+                "enabled": True,
+                "type": "top_hits",
+                "params": {
+                    "field": "@timestamp",
+                    "aggregate": "concat",
+                    "size": 1,
+                    "sortField": "@timestamp",
+                    "sortOrder": "desc",
+                },
+                "schema": "metric",
+            },
+            # Bucket: device name. Order by MAX(new_domain_count) so high
+            # surges float to the top. (Table ordering uses a separate agg;
+            # we piggy-back on a max metric below via orderBy ref.)
+            {
+                "id": "4",
+                "enabled": True,
+                "type": "max",
+                "params": {"field": "data.new_domain_count"},
+                "schema": "metric",
+            },
+            {
+                "id": "5",
+                "enabled": True,
+                "type": "terms",
+                "params": {
+                    "field": "data.device.name",
+                    "orderBy": "4",
+                    "order": "desc",
+                    "size": 50,
+                    "otherBucket": False,
+                    "missingBucket": False,
+                },
+                "schema": "bucket",
+            },
+        ],
+        "params": {
+            "perPage": 25,
+            "showPartialRows": False,
+            "showMetricsAtAllLevels": False,
+            "sort": {"columnIndex": None, "direction": None},
+            "showTotal": False,
+            "totalFunc": "sum",
+            "percentageCol": "",
+        },
+    }
+
+    search_source = {
+        "query": {"query": "rule.id: \"100720\"", "language": "kuery"},
+        "filter": [],
+        "indexRefName": "kibanaSavedObjectMeta.searchSourceJSON.index",
+    }
+
+    return {
+        "attributes": {
+            "description": (
+                "Per-device snapshot of the most recent first-seen scan. "
+                "Shows each device's latest new_domain_count and the actual "
+                "new_domains array — immediately actionable: recognize each "
+                "domain or flag for investigation. Sorted by new-domain "
+                "count descending so surge devices surface at top. Source: "
+                "rule 100720, one row per device per scan cycle."
+            ),
+            "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps(search_source)},
+            "title": FIRST_SEEN_TABLE_TITLE,
+            "uiStateJSON": "{}",
+            "version": 1,
+            "visState": json.dumps(vis_state),
+        },
+        "id": FIRST_SEEN_TABLE_ID,
+        "migrationVersion": {"visualization": "7.10.0"},
+        "references": [{
+            "id": INDEX_PATTERN_ID,
+            "name": "kibanaSavedObjectMeta.searchSourceJSON.index",
+            "type": "index-pattern",
+        }],
+        "type": "visualization",
+        "updated_at": "2026-04-25T00:00:00.000Z",
+        "version": "1",
+    }
+
+
 def _load(path: Path) -> list[dict]:
     with path.open() as f:
         return [json.loads(line) for line in f if line.strip()]
@@ -437,8 +568,9 @@ def main() -> int:
     objs, removed = _remove_viz_and_panel(objs, REMOVE_VIZ_ID)
     objs, added_intel = _add_viz_and_panel(objs, _alarm_intel_rate_viz(), DASHBOARD_ID)
     objs, added_firstseen = _add_viz_and_panel(objs, _first_seen_by_device_viz(), DASHBOARD_ID)
+    objs, added_snapshot = _add_viz_and_panel(objs, _first_seen_snapshot_table(), DASHBOARD_ID)
 
-    if not removed and not added_intel and not added_firstseen:
+    if not removed and not added_intel and not added_firstseen and not added_snapshot:
         print("already patched — no changes needed.")
         return 0
 
@@ -455,6 +587,10 @@ def main() -> int:
         print(f"  + ADDED '{FIRST_SEEN_VIZ_TITLE}' ({FIRST_SEEN_VIZ_ID}).")
     else:
         print(f"  + already present: '{FIRST_SEEN_VIZ_TITLE}'")
+    if added_snapshot:
+        print(f"  + ADDED '{FIRST_SEEN_TABLE_TITLE}' ({FIRST_SEEN_TABLE_ID}).")
+    else:
+        print(f"  + already present: '{FIRST_SEEN_TABLE_TITLE}'")
 
     # Confidence check: every reference in the dashboard should resolve to
     # an object we still have (or to the wazuh-alerts-* index pattern).
