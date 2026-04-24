@@ -16,6 +16,18 @@ def test_parse_last_30d():
     assert parse_time_range("last_30d") == {"gte": "now-30d/d", "lte": "now"}
 
 
+def test_parse_last_prior_7d_is_disjoint_from_last_7d():
+    assert parse_time_range("last_prior_7d") == {"gte": "now-14d/d", "lte": "now-7d/d"}
+
+
+def test_parse_last_prior_24h():
+    assert parse_time_range("last_prior_24h") == {"gte": "now-48h/h", "lte": "now-24h/h"}
+
+
+def test_parse_last_prior_30d():
+    assert parse_time_range("last_prior_30d") == {"gte": "now-60d/d", "lte": "now-30d/d"}
+
+
 def test_parse_iso_range():
     got = parse_time_range("2026-04-20T00:00:00Z/2026-04-24T00:00:00Z")
     assert got == {

@@ -25,6 +25,20 @@ _TI_RULE_IDS_CUSTOM = ["100450", "100451", "100452", "100453"]
 _TI_RULE_IDS_IOC = [str(i) for i in range(99901, 100000)]
 _TI_ALL_RULE_IDS = _TI_RULE_IDS_CUSTOM + _TI_RULE_IDS_IOC
 
+# Fallback mapping from rule.id → threat-intel list name, used when
+# `data.threat_intel.list` is not set on the alert. The custom sidecar
+# rules (100450-100453) don't populate that field today; built-in
+# malicious-ioc rules (99901-99999) don't either. This gives the LLM a
+# usable label instead of null.
+_RULE_ID_TO_LIST: dict[str, str] = {
+    "100450": "firewalla-c2",   # Feodo Tracker botnet C2
+    "100451": "firewalla-c2",   # ThreatFox C2 IPs
+    "100452": "urlhaus",        # URLhaus malware domains
+    "100453": "malware-hashes", # MalwareBazaar SHA256
+}
+for _rid in _TI_RULE_IDS_IOC:
+    _RULE_ID_TO_LIST[_rid] = "malicious-ioc"
+
 
 class AlertNotFound(LookupError):
     """Raised when get_alert cannot find the requested alert_id."""
@@ -306,16 +320,22 @@ class WazuhDataService:
         matches = []
         for h in resp["hits"]["hits"]:
             src = h.get("_source", {})
-            ti = src.get("data", {}).get("threat_intel", {})
+            ti = src.get("data", {}).get("threat_intel", {}) or {}
+            rule_id = src.get("rule", {}).get("id")
+            # Prefer the decoder-supplied list/ioc; fall back to a rule-id
+            # mapping for list, and to dst_ip (the matched value for most of
+            # our rules) for ioc.
+            list_name = ti.get("list") or _RULE_ID_TO_LIST.get(rule_id)
+            ioc = ti.get("ioc") or src.get("data", {}).get("dstip")
             matches.append({
                 "id": h["_id"],
                 "@timestamp": src.get("@timestamp"),
-                "list": ti.get("list"),
-                "ioc": ti.get("ioc"),
+                "list": list_name,
+                "ioc": ioc,
                 "agent": src.get("agent", {}).get("name"),
                 "src_ip": src.get("data", {}).get("srcip"),
                 "dst_ip": src.get("data", {}).get("dstip"),
-                "rule_id": src.get("rule", {}).get("id"),
+                "rule_id": rule_id,
             })
         return {"matches": matches, "total": resp["hits"]["total"]["value"]}
 

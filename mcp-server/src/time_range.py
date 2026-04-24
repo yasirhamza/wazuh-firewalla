@@ -3,12 +3,21 @@ from datetime import datetime, timezone
 
 
 SHORTHAND = {
+    # Current windows.
     "last_1h": {"gte": "now-1h/h", "lte": "now"},
     "last_6h": {"gte": "now-6h/h", "lte": "now"},
     "last_24h": {"gte": "now-24h/h", "lte": "now"},
     "last_7d": {"gte": "now-7d/d", "lte": "now"},
     "last_30d": {"gte": "now-30d/d", "lte": "now"},
     "last_90d": {"gte": "now-90d/d", "lte": "now"},
+    # Prior (disjoint) windows — pair with the matching current window in
+    # trend_delta for meaningful period-over-period comparisons. e.g.
+    # current_window="last_7d", prior_window="last_prior_7d" gives a real
+    # week-over-week delta.
+    "last_prior_24h": {"gte": "now-48h/h", "lte": "now-24h/h"},
+    "last_prior_7d": {"gte": "now-14d/d", "lte": "now-7d/d"},
+    "last_prior_30d": {"gte": "now-60d/d", "lte": "now-30d/d"},
+    "last_prior_90d": {"gte": "now-180d/d", "lte": "now-90d/d"},
 }
 
 MAX_SPAN_DAYS = 90

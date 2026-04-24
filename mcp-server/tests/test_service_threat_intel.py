@@ -56,3 +56,30 @@ def test_threat_intel_matches_list_filter_all_adds_no_filter():
     svc.threat_intel_matches(time_range="last_24h", list_filter="all")
     filters = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
     assert not any("data.threat_intel.list" in str(f) for f in filters)
+
+
+def test_threat_intel_matches_derives_list_from_rule_id_when_missing():
+    """When data.threat_intel.list is absent, fall back to the rule-id map."""
+    client = MagicMock()
+    client.search.return_value = {
+        "hits": {"total": {"value": 3}, "hits": [
+            # rule 100452 → urlhaus
+            {"_id": "a1", "_source": {"rule": {"id": "100452"},
+                                       "data": {"srcip": "10.0.0.1", "dstip": "198.51.100.10"}}},
+            # rule 99950 → malicious-ioc (built-in bucket)
+            {"_id": "a2", "_source": {"rule": {"id": "99950"},
+                                       "data": {"srcip": "10.0.0.2", "dstip": "203.0.113.10"}}},
+            # decoder-supplied list wins over the fallback map
+            {"_id": "a3", "_source": {"rule": {"id": "100452"},
+                                       "data": {"srcip": "10.0.0.3", "dstip": "203.0.113.20",
+                                                "threat_intel": {"list": "custom-feed", "ioc": "attacker.tld"}}}},
+        ]}
+    }
+    svc = WazuhDataService(client)
+    out = svc.threat_intel_matches(time_range="last_24h")
+    by_id = {m["id"]: m for m in out["matches"]}
+    assert by_id["a1"]["list"] == "urlhaus"
+    assert by_id["a1"]["ioc"] == "198.51.100.10"   # fallback to dst_ip
+    assert by_id["a2"]["list"] == "malicious-ioc"
+    assert by_id["a3"]["list"] == "custom-feed"    # decoder-supplied wins
+    assert by_id["a3"]["ioc"] == "attacker.tld"
