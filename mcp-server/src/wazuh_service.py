@@ -264,3 +264,43 @@ class WazuhDataService:
             movers.sort(key=lambda m: abs(m["delta_abs"]), reverse=True)
             out["movers"] = movers[:top_n]
         return out
+
+    def threat_intel_matches(
+        self,
+        time_range: str,
+        list_filter: str = "all",
+        top_n: int = 100,
+    ) -> dict[str, Any]:
+        ti_filter = {
+            "bool": {"should": [
+                {"terms": {"rule.id": ["100450", "100451", "100452", "100453"]}},
+                {"range": {"rule.id": {"gte": "99901", "lte": "99999"}}},
+            ]}
+        }
+        clauses = self._build_filter_clauses(None, time_range)
+        if list_filter and list_filter != "all":
+            clauses.append({"term": {"data.threat_intel.list": list_filter}})
+        clauses.append(ti_filter)
+
+        body = {
+            "size": min(top_n, HARD_RESULT_CAP),
+            "sort": [{"@timestamp": "desc"}],
+            "query": {"bool": {"filter": clauses}},
+            "track_total_hits": True,
+        }
+        resp = self._client.search(index=self._alerts_index, body=body)
+        matches = []
+        for h in resp["hits"]["hits"]:
+            src = h.get("_source", {})
+            ti = src.get("data", {}).get("threat_intel", {})
+            matches.append({
+                "id": h["_id"],
+                "@timestamp": src.get("@timestamp"),
+                "list": ti.get("list"),
+                "ioc": ti.get("ioc"),
+                "agent": src.get("agent", {}).get("name"),
+                "src_ip": src.get("data", {}).get("srcip"),
+                "dst_ip": src.get("data", {}).get("dstip"),
+                "rule_id": src.get("rule", {}).get("id"),
+            })
+        return {"matches": matches, "total": resp["hits"]["total"]["value"]}
