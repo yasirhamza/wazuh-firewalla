@@ -154,6 +154,31 @@ services:
       - threat_intel_lists:/lists
       - sidecar_status:/status
 
+  wazuh-mcp:
+    build: ./mcp-server
+    container_name: single-node-wazuh-mcp
+    hostname: wazuh-mcp
+    restart: unless-stopped
+    environment:
+      - MCP_OS_USER=${MCP_OS_USER}
+      - MCP_OS_PASSWORD=${MCP_OS_PASSWORD}
+      - MCP_API_KEY=${MCP_API_KEY}
+      - MCP_HTTP_PORT=${MCP_HTTP_PORT:-8800}
+      - OPENSEARCH_URL=https://wazuh.indexer:9200
+      - MAX_LOG_SIZE=${MAX_LOG_SIZE:-10485760}
+      - MAX_LOG_BACKUPS=${MAX_LOG_BACKUPS:-2}
+      - RATE_LIMIT_PER_MIN=${RATE_LIMIT_PER_MIN:-60}
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-10}
+    ports:
+      - "127.0.0.1:${MCP_HTTP_PORT:-8800}:${MCP_HTTP_PORT:-8800}"
+    volumes:
+      - sidecar_status:/var/ossec/logs/sidecar-status
+    depends_on:
+      wazuh.indexer:
+        condition: service_started
+      wazuh.manager:
+        condition: service_healthy
+
 volumes:
   wazuh_api_configuration:
   wazuh_etc:
