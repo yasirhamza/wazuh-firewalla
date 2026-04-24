@@ -257,12 +257,16 @@
 </group>
 
 <!--
-  ========== WINDOWS NOISE SUPPRESSION ==========
+  ========== NOISE SUPPRESSION (cross-platform) ==========
   Rule IDs: 100700-100799
   Lower the level of built-in Wazuh rules to 0 when they fire on
-  well-understood benign Windows events, so they still index but
-  don't generate alerts. Start narrow — suppress by specific
-  event-data pattern, not by rule-id alone.
+  well-understood benign events, so they still index but don't
+  generate alerts. Start narrow — suppress by specific data pattern,
+  not by rule-id alone.
+
+  Subranges:
+    100700-100709  Windows noise
+    100710-100719  AppArmor (Linux) noise
 -->
 <group name="windows,noise-suppression,">
 
@@ -275,6 +279,27 @@
     <field name="win.eventdata.param1">^Windows\.Media\.Capture\.Internal\.AppCaptureShell$</field>
     <description>Suppressed: DCOM AppCaptureShell timeout (Windows Game DVR noise)</description>
     <group>noise_suppressed,</group>
+  </rule>
+
+  <!-- Firefox AppArmor sandbox denies. Firefox runs under a strict AppArmor
+       profile on Debian/Ubuntu (same profile name 'firefox' regardless of
+       whether the binary comes from the deb or the snap package). The profile
+       blocks many reads that its content processes routinely attempt — all by
+       design, all benign. Historical volume: ~3-4k denies/day on a single
+       endpoint, ~98% of that host's AppArmor signal. -->
+  <rule id="100710" level="0">
+    <if_sid>52002</if_sid>
+    <match>profile="firefox"</match>
+    <description>Suppressed: Firefox AppArmor sandbox deny (benign)</description>
+    <group>apparmor,noise_suppressed,</group>
+  </rule>
+
+  <!-- Same as 100710 but for the snap-wrapped Firefox profile. -->
+  <rule id="100711" level="0">
+    <if_sid>52002</if_sid>
+    <match>profile="snap.firefox.firefox"</match>
+    <description>Suppressed: Firefox (snap) AppArmor sandbox deny (benign)</description>
+    <group>apparmor,noise_suppressed,</group>
   </rule>
 
 </group>
