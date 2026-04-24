@@ -271,4 +271,32 @@ def build_app(service: WazuhDataService, rate_limiter: RateLimiter) -> FastMCP:
                               time_range=time_range, top_n=top_n,
                           ))
 
+    # --- first_seen_domains ---
+    @app.tool(
+        description=(
+            "Surface domains a device contacted in `recent_window` that it has "
+            "NOT contacted in the `baseline_days` period before that. Useful "
+            "behavior-change detector — catches 'a new app/SDK just started "
+            "calling home' without relying on IOC blocklists (which decay). "
+            "Scope: Firewalla alarm events only; flows don't carry domain as "
+            "a first-class field. `recent_window` must be a shorthand like "
+            "'last_7d' or 'last_24h' (not an ISO range)."
+        ),
+    )
+    def first_seen_domains(
+        device_name: Annotated[str, Field(
+            description="Firewalla device name (e.g. 'kids-laptop', 'laptop-1', 'Kids iPad').")],
+        recent_window: Annotated[str, Field(
+            description="Shorthand window (e.g. 'last_7d').")] = "last_7d",
+        baseline_days: Annotated[int, Field(ge=7, le=180)] = 90,
+        top_n: Annotated[int, Field(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
+        return _wrap_call("first_seen_domains", rate_limiter,
+                          lambda: service.first_seen_domains(
+                              device_name=device_name,
+                              recent_window=recent_window,
+                              baseline_days=baseline_days,
+                              top_n=top_n,
+                          ))
+
     return app

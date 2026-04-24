@@ -505,3 +505,88 @@ class WazuhDataService:
                 for h in resp["hits"]["hits"]
             ],
         }
+
+    # Cap on how many unique domains we pull from each window. Beyond this,
+    # the set-difference becomes less meaningful (and ES agg memory grows).
+    _DOMAIN_BUCKET_CAP = 10000
+
+    def first_seen_domains(
+        self,
+        device_name: str,
+        recent_window: str = "last_7d",
+        baseline_days: int = 90,
+        top_n: int = 100,
+    ) -> dict[str, Any]:
+        """Domains a device contacted in `recent_window` that were NOT seen
+        in the `baseline_days` period immediately before it.
+
+        Why it's useful: IOC-based blocklists decay (malvertising/C2 domains
+        rotate weekly). Blocking individual dead domains is low-value. What
+        *does* have signal is "device X is touching a domain it's never
+        touched before" — that's the behavior-change indicator that a new
+        app, SDK, or compromise has landed.
+
+        Scope: queries Firewalla alarm events (`data.event_type: alarm`),
+        where `data.raw.remote.domain` is a first-class field. Flows don't
+        have a direct domain field, so they're excluded from this analysis.
+
+        `recent_window` must use shorthand (last_Xh/last_Xd) — ISO ranges
+        are rejected because we need to compute a disjoint prior window
+        automatically.
+        """
+        recent_range = parse_time_range(recent_window)
+        if not recent_range["gte"].startswith("now-"):
+            raise ValueError(
+                "first_seen_domains requires a shorthand recent_window "
+                "(e.g. 'last_7d'); ISO ranges are not supported because "
+                "the baseline window is derived from the recent one."
+            )
+        # Parse the "now-Xd" or "now-Xh" prefix to shift the baseline end.
+        shift = recent_range["gte"][len("now-") :]  # e.g. "7d/d" or "24h/h"
+        num_str, _ = shift.split("/", 1)
+        if num_str.endswith("d"):
+            recent_days = int(num_str[:-1])
+        elif num_str.endswith("h"):
+            recent_days = max(1, int(num_str[:-1]) // 24)
+        else:
+            raise ValueError(f"unsupported recent_window unit: {num_str!r}")
+
+        baseline_total_days = recent_days + baseline_days
+        baseline_range = {
+            "gte": f"now-{baseline_total_days}d/d",
+            "lte": recent_range["gte"],  # end of baseline == start of recent
+        }
+
+        def _domains_for(time_filter: dict[str, Any]) -> set[str]:
+            body = {
+                "size": 0,
+                "query": {"bool": {"filter": [
+                    {"range": {"@timestamp": time_filter}},
+                    {"term": {"data.event_type": "alarm"}},
+                    {"term": {"data.device.name": device_name}},
+                    {"exists": {"field": "data.raw.remote.domain"}},
+                ]}},
+                "aggs": {"domains": {"terms": {
+                    "field": "data.raw.remote.domain",
+                    "size": self._DOMAIN_BUCKET_CAP,
+                }}},
+                "track_total_hits": True,
+            }
+            resp = self._client.search(index=self._alerts_index, body=body)
+            return {b["key"] for b in resp["aggregations"]["domains"]["buckets"]}
+
+        recent_set = _domains_for(recent_range)
+        baseline_set = _domains_for(baseline_range)
+        new_domains = sorted(recent_set - baseline_set)
+
+        return {
+            "device": device_name,
+            "recent_window": recent_window,
+            "baseline_window": f"{baseline_range['gte']} / {baseline_range['lte']}",
+            "baseline_days": baseline_days,
+            "recent_unique_domains": len(recent_set),
+            "baseline_unique_domains": len(baseline_set),
+            "new_domain_count": len(new_domains),
+            "new_domains": new_domains[:top_n],
+            "truncated": len(new_domains) > top_n,
+        }

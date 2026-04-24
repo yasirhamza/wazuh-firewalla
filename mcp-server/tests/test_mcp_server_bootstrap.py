@@ -33,6 +33,7 @@ def test_build_app_returns_fastmcp_instance_with_eight_tools():
     expected = {
         "search_alerts", "aggregate_alerts", "alert_overview", "trend_delta",
         "threat_intel_matches", "sidecar_health", "get_alert", "entity_activity",
+        "first_seen_domains",
     }
     assert expected.issubset(names)
 
