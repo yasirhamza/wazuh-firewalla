@@ -361,24 +361,31 @@ def main():
     STATUS_DIR.mkdir(parents=True, exist_ok=True)
     status = StatusReporter(STATUS_DIR)
 
-    last_heartbeat = 0
-    heartbeat_interval = 3600  # 1 hour (since updates are every 24h)
+    HEARTBEAT_INTERVAL = 60  # 1 min — matches wazuh-mcp so sidecar_health
+                             # (stale threshold 5 min) never false-positives.
+
+    last_update = 0.0
+    last_heartbeat = 0.0
 
     while True:
-        try:
-            update_feeds(status)
-        except Exception as e:
-            logger.exception(f"Error during feed update: {e}")
-            status.report_error("all", str(e))
-
-        # Send heartbeat periodically
         now = time.time()
-        if now - last_heartbeat >= heartbeat_interval:
+
+        # Run a feed update cycle when UPDATE_INTERVAL has elapsed.
+        if now - last_update >= UPDATE_INTERVAL:
+            try:
+                update_feeds(status)
+            except Exception as e:
+                logger.exception(f"Error during feed update: {e}")
+                status.report_error("all", str(e))
+            last_update = now
+            logger.info(f"Next feed update in {UPDATE_INTERVAL}s.")
+
+        # Emit a heartbeat every HEARTBEAT_INTERVAL, independent of feed updates.
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
             status.report_heartbeat()
             last_heartbeat = now
 
-        logger.info(f"Sleeping for {UPDATE_INTERVAL}s until next update...")
-        time.sleep(UPDATE_INTERVAL)
+        time.sleep(HEARTBEAT_INTERVAL)
 
 
 if __name__ == "__main__":
