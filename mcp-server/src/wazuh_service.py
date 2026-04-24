@@ -177,3 +177,90 @@ class WazuhDataService:
             "threat_intel_hits": aggs["threat_intel_hits"]["doc_count"],
             "time_range": time_range,
         }
+
+    _METRIC_FIELD = {
+        "total_alerts": None,  # pure count, no agg field
+        "alerts_by_source": "data.source",
+        "alerts_by_rule_group": "rule.groups",
+        "alerts_by_agent": "agent.name",
+        "threat_intel_hits": None,  # count of TI-rule matches
+    }
+
+    def _count_or_group(
+        self,
+        time_range: str,
+        metric: str,
+        filters: dict[str, Any] | None,
+        top_n: int,
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Return (total, groups). Groups is [] when metric has no group field."""
+        clauses = self._build_filter_clauses(filters, time_range)
+        if metric == "threat_intel_hits":
+            clauses.append({
+                "bool": {"should": [
+                    {"terms": {"rule.id": ["100450", "100451", "100452", "100453"]}},
+                    {"range": {"rule.id": {"gte": "99901", "lte": "99999"}}},
+                ]}
+            })
+        body: dict[str, Any] = {
+            "size": 0,
+            "query": {"bool": {"filter": clauses}},
+            "track_total_hits": True,
+        }
+        field = self._METRIC_FIELD[metric]
+        if field is not None:
+            body["aggs"] = {"by_field": {"terms": {"field": field, "size": min(top_n, 50)}}}
+        resp = self._client.search(index=self._alerts_index, body=body)
+        total = resp["hits"]["total"]["value"]
+        groups = []
+        if field is not None:
+            groups = [
+                {"key": b["key"], "count": b["doc_count"]}
+                for b in resp["aggregations"]["by_field"]["buckets"]
+            ]
+        return total, groups
+
+    @staticmethod
+    def _pct_change(current: int, prior: int) -> float | None:
+        if prior == 0:
+            return None
+        return round((current - prior) / prior * 100.0, 2)
+
+    def trend_delta(
+        self,
+        metric: str,
+        current_window: str,
+        prior_window: str,
+        filters: dict[str, Any] | None = None,
+        top_n: int = 10,
+    ) -> dict[str, Any]:
+        if metric not in self._METRIC_FIELD:
+            raise ValueError(f"unknown metric: {metric}")
+        cur_total, cur_groups = self._count_or_group(current_window, metric, filters, top_n)
+        pri_total, pri_groups = self._count_or_group(prior_window, metric, filters, top_n)
+
+        out: dict[str, Any] = {
+            "metric": metric,
+            "current_window": current_window,
+            "prior_window": prior_window,
+            "current": cur_total,
+            "prior": pri_total,
+            "delta_pct": self._pct_change(cur_total, pri_total),
+        }
+        if cur_groups or pri_groups:
+            pri_map = {g["key"]: g["count"] for g in pri_groups}
+            cur_map = {g["key"]: g["count"] for g in cur_groups}
+            keys = set(pri_map) | set(cur_map)
+            movers = [
+                {
+                    "key": k,
+                    "current": cur_map.get(k, 0),
+                    "prior": pri_map.get(k, 0),
+                    "delta_abs": cur_map.get(k, 0) - pri_map.get(k, 0),
+                    "delta_pct": self._pct_change(cur_map.get(k, 0), pri_map.get(k, 0)),
+                }
+                for k in keys
+            ]
+            movers.sort(key=lambda m: abs(m["delta_abs"]), reverse=True)
+            out["movers"] = movers[:top_n]
+        return out
