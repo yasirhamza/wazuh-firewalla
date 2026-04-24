@@ -63,12 +63,16 @@ def main() -> None:
         return
 
     # HTTP/SSE: wrap the FastMCP SSE app with auth + /healthz, run via uvicorn.
+    # Bind to 0.0.0.0 INSIDE the container — host-side localhost-only exposure
+    # is enforced by the docker-compose `ports: 127.0.0.1:PORT:PORT` mapping.
+    # Binding to 127.0.0.1 inside the container would reject Docker-routed
+    # traffic from the host (arrives on eth0, not loopback).
     sse_app = mcp_app.sse_app()
     http_app = build_http_app(inner_app=sse_app, api_key=settings.api_key)
-    logger.info("starting SSE on 127.0.0.1:%d", settings.http_port)
+    logger.info("starting SSE on 0.0.0.0:%d (host-exposed as 127.0.0.1)", settings.http_port)
     uvicorn.run(
         http_app,
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=settings.http_port,
         log_config=None,   # don't override our JSON logger
     )
