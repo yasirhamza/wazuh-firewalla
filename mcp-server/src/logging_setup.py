@@ -124,6 +124,11 @@ class HeartbeatWriter:
         while not self._stop_evt.wait(self._interval):
             self._emit_heartbeat()
 
+    def emit_once(self) -> None:
+        """Emit a single heartbeat synchronously. Intended for seeding the
+        shared stream at startup before the background thread begins ticking."""
+        self._emit_heartbeat()
+
     def _emit_heartbeat(self) -> None:
         now = time.time()
         with self._lock:

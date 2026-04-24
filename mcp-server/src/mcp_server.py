@@ -15,7 +15,7 @@ from typing import Annotated, Any, Literal
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from src.limits import RateLimitExceeded, RateLimiter, cap_results
+from src.limits import RateLimitExceeded, RateLimiter
 from src.time_range import TimeRangeError
 from src.wazuh_client import WazuhClientError
 from src.wazuh_service import AlertNotFound, WazuhDataService
@@ -144,14 +144,13 @@ def build_app(service: WazuhDataService, rate_limiter: RateLimiter) -> FastMCP:
         sort_by: Annotated[Literal["@timestamp", "rule.level"], Field()] = "@timestamp",
         limit: Annotated[int, Field(ge=1, le=100)] = 25,
     ) -> dict[str, Any]:
-        def _call():
-            raw = service.search_alerts(
-                time_range=time_range, filters=filters, lucene=lucene,
-                sort_by=sort_by, limit=limit,
-            )
-            return cap_results(raw["results"], cap=limit,
-                               total_matched=raw["total_matched"])
-        return _wrap_call("search_alerts", rate_limiter, _call)
+        # The service applies min(limit, HARD_RESULT_CAP) and emits its own
+        # `truncated` flag — don't re-cap here (that overwrote the service's
+        # contract and double-truncated in ways the service couldn't see).
+        return _wrap_call("search_alerts", rate_limiter, lambda: service.search_alerts(
+            time_range=time_range, filters=filters, lucene=lucene,
+            sort_by=sort_by, limit=limit,
+        ))
 
     # --- aggregate_alerts ---
     @app.tool(

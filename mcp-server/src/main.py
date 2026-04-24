@@ -48,7 +48,7 @@ def main() -> None:
         max_size=settings.max_log_size,
         max_backups=settings.max_log_backups,
     )
-    heartbeat._emit_heartbeat()  # seed the stream on startup
+    heartbeat.emit_once()  # seed the stream on startup
     heartbeat.start()
 
     rate_limiter = RateLimiter(

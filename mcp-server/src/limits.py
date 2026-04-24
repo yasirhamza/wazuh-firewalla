@@ -18,17 +18,34 @@ class _Bucket:
 
 
 class RateLimiter:
-    """Token-bucket per key. refill_rate tokens/sec, capped at burst."""
+    """Token-bucket per key. refill_rate tokens/sec, capped at burst.
+
+    Buckets that have been idle longer than `_BUCKET_TTL_SEC` are dropped
+    opportunistically (when we notice we haven't pruned in a while). This
+    keeps the dict bounded if the caller ever switches from a single
+    'global' key to per-caller keying.
+    """
+
+    _PRUNE_INTERVAL_SEC = 60.0
+    _BUCKET_TTL_SEC = 300.0
 
     def __init__(self, per_min: int, burst: int):
         self._refill = per_min / 60.0
         self._burst = float(burst)
         self._lock = Lock()
         self._buckets: dict[str, _Bucket] = {}
+        self._last_prune = time.monotonic()
 
     def check(self, key: str) -> None:
         now = time.monotonic()
         with self._lock:
+            if now - self._last_prune > self._PRUNE_INTERVAL_SEC:
+                cutoff = now - self._BUCKET_TTL_SEC
+                stale = [k for k, b in self._buckets.items() if b.updated < cutoff]
+                for k in stale:
+                    del self._buckets[k]
+                self._last_prune = now
+
             b = self._buckets.get(key)
             if b is None:
                 self._buckets[key] = _Bucket(tokens=self._burst - 1, updated=now)
