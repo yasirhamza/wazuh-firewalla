@@ -154,6 +154,43 @@ class HeartbeatWriter:
             event["error_message"] = report["error"]
         self._append_event(event)
 
+    REQUIRED_HUNT_FINDING_FIELDS = (
+        "hypothesis_id", "run_id", "finding_id",
+        "attack_technique", "attack_tactic", "confidence",
+        "analyst", "summary", "recommendation", "evidence",
+    )
+    VALID_CONFIDENCE = frozenset({"low", "medium", "high"})
+
+    def record_hunt_finding(self, finding: dict[str, Any]) -> None:
+        """Append a hunt finding to the shared sidecar-status stream.
+
+        Validates required fields and the confidence enum locally so a malformed
+        payload from the MCP tool surface fails loudly here, not silently in the
+        Wazuh decoder.
+
+        Schema documented in docs/specs/2026-04-25-cti-driven-hunting-design.md §4.3.
+        """
+        for f in self.REQUIRED_HUNT_FINDING_FIELDS:
+            if f not in finding:
+                raise ValueError(f"hunt finding missing required field: {f}")
+        if finding["confidence"] not in self.VALID_CONFIDENCE:
+            raise ValueError(
+                f"hunt finding confidence must be one of {sorted(self.VALID_CONFIDENCE)}, "
+                f"got {finding['confidence']!r}"
+            )
+
+        now = time.time()
+        event = {
+            "timestamp": _iso(now),
+            "event_type": "sidecar_status",
+            "source": "sidecar-status",
+            "sidecar": self._sidecar,
+            "job_type": "hunt_finding",
+            "sync_status": "reported",
+            "hunt": dict(finding),
+        }
+        self._append_event(event)
+
     # ---------- internals ----------
     def _prune_locked(self) -> None:
         cutoff = time.time() - 600  # 10 min

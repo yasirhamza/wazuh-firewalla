@@ -49,6 +49,7 @@ services:
       - ./msp-poller/wazuh-config/rules/firewalla_rules.xml:/var/ossec/etc/rules/firewalla_rules.xml:ro
       - ./config/wazuh_decoders/windows_srp_decoders.xml:/var/ossec/etc/decoders/windows_srp_decoders.xml:ro
       - ./config/wazuh_rules/windows_srp_rules.xml:/var/ossec/etc/rules/windows_srp_rules.xml:ro
+      - ./config/wazuh_rules/hunting_rules.xml:/var/ossec/etc/rules/hunting_rules.xml:ro
       - threat_intel_lists:/var/ossec/etc/lists/threat-intel
       - ./config/wazuh_lists:/var/ossec/etc/lists/srp:rw
       - ./scripts/sync-baseline.sh:/var/ossec/active-response/bin/sync-baseline.sh:ro
@@ -207,6 +208,11 @@ services:
       - FIRST_SEEN_ENABLED=${FIRST_SEEN_ENABLED:-true}
     volumes:
       - sidecar_status:/var/ossec/logs/sidecar-status
+    # Disable the HTTP healthcheck inherited from the wazuh-mcp image —
+    # this service is a batch job with no HTTP server. Liveness is reported
+    # via the sidecar-status JSONL heartbeat stream (rule 100503).
+    healthcheck:
+      disable: true
     depends_on:
       wazuh.indexer:
         condition: service_started

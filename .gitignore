@@ -144,3 +144,11 @@ snapshots/
 .envrc
 .cursorrules
 .aider*
+
+# ===========================================
+# CTI-driven hunting
+# ===========================================
+cti-cache/attack/enterprise-attack.json
+cti-cache/attack/*.json.tmp
+hunts/runs/*.md
+!hunts/runs/.gitkeep

@@ -1,0 +1,60 @@
+id: H-2026-003
+title: "Windows credential dumping artifacts in SRP / executable launches"
+created: 2026-04-25
+updated: 2026-04-25
+owner: yasirhamza
+status: proposed
+priority: high
+
+threat_actor: null
+attack:
+  techniques: ["T1003.001", "T1003.003"]
+  tactics: ["credential-access"]
+
+cti_sources:
+  - type: mitre
+    ref: "T1003.001"
+    url: "https://attack.mitre.org/techniques/T1003/001/"
+  - type: mitre
+    ref: "T1003.003"
+    url: "https://attack.mitre.org/techniques/T1003/003/"
+  - type: vendor
+    ref: "CrowdStrike Falcon: LSASS credential theft trends"
+    url: "https://www.crowdstrike.com/blog/"
+
+abstract: >
+  Credential dumping via LSASS access (T1003.001) or NTDS.dit extraction
+  (T1003.003) commonly leaves artifacts: tools like Mimikatz, ProcDump,
+  comsvcs.dll abuse, NTDS-related copies. Detectable in Wazuh via SRP
+  events and FIM signals on suspicious executables.
+
+hypothesis: >
+  If credential dumping has occurred on a Windows host in our environment,
+  we should observe one or more of: SRP allow/block events for known dumpers
+  (mimikatz, procdump, lazagne), executions of comsvcs.dll via rundll32,
+  or recent file modifications matching ntds*, *.dit, or sam* in unexpected
+  paths.
+
+data_sources:
+  - "wazuh-alerts-* (data.source: windows-srp)"
+  - "wazuh-alerts-* (rule.id: 100660,100661,100662,100663)  # new SRP executables"
+
+scope:
+  time_range: "last_30d"
+  agents: "all_windows"
+  exclude: []
+
+success_criteria: >
+  Confirm: any single host with (a) SRP execution of mimikatz/procdump/lazagne,
+  OR (b) rundll32 invoking comsvcs.dll MiniDump, OR (c) a new executable
+  matching `*\(mimi|proc|laza)*.exe` outside Program Files.
+  Refute: no such artifacts, or all matches explained by authorized red-team /
+  pentest activity.
+
+investigation_steps:
+  - "Search SRP events with target_path matching mimikatz|procdump|lazagne|wce|dumpit"
+  - "Aggregate new-executable alerts (100660-100663) for binaries with credential-dumper-like names"
+  - "Pivot to entity_activity for any host that matched in steps 1-2"
+  - "Cross-check timing against known authorized testing windows"
+
+tags: [credential-access, windows, lsass]

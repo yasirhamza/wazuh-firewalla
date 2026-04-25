@@ -25,7 +25,7 @@ def test_startup_self_check_fails_when_count_raises():
         startup_self_check(client, alerts_index="wazuh-alerts-*")
 
 
-def test_build_app_returns_fastmcp_instance_with_eight_tools():
+def test_build_app_returns_fastmcp_instance_with_expected_tools():
     app = build_app(service=MagicMock(), rate_limiter=MagicMock())
     assert hasattr(app, "run")  # FastMCP app
     # Retrieve the registered tool names.
@@ -33,7 +33,7 @@ def test_build_app_returns_fastmcp_instance_with_eight_tools():
     expected = {
         "search_alerts", "aggregate_alerts", "alert_overview", "trend_delta",
         "threat_intel_matches", "sidecar_health", "get_alert", "entity_activity",
-        "first_seen_domains",
+        "first_seen_domains", "submit_hunt_finding",
     }
     assert expected.issubset(names)
 

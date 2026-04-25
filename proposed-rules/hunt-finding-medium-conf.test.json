@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-04-25T22:18:30Z",
+  "event_type": "sidecar_status",
+  "source": "sidecar-status",
+  "sidecar": "hunt-runner",
+  "job_type": "hunt_finding",
+  "sync_status": "reported",
+  "hunt": {
+    "hypothesis_id": "H-2026-001",
+    "run_id": "H-2026-001-20260425T2200Z",
+    "finding_id": "F-2026-001-a",
+    "attack_technique": "T1071.001",
+    "attack_tactic": "command-and-control",
+    "confidence": "medium",
+    "analyst": "yasirhamza",
+    "summary": "test: medium-confidence finding",
+    "recommendation": "test only",
+    "evidence": {
+      "agent_name": "test-agent",
+      "destination_ip": "203.0.113.5",
+      "flow_count": 47,
+      "supporting_alert_ids": ["test-alert-1"]
+    }
+  }
+}

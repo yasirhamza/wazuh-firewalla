@@ -1,0 +1,11 @@
+# Backlog index — drives /hunt menu and /hunt --next.
+# Maintained by Claude during hunt sessions; analyst can reorder `queued` manually.
+
+queued:
+  - H-2026-002
+  - H-2026-003
+
+in_progress: []
+
+recently_completed:
+  - H-2026-001

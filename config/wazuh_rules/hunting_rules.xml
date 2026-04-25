@@ -1,0 +1,49 @@
+<!--
+  CTI-driven hunting rule chain (100800-100899).
+  Chains off the existing 100500 sidecar-status base rule.
+  Spec: docs/specs/2026-04-25-cti-driven-hunting-design.md
+-->
+<group name="hunting,sidecar_status,">
+
+  <!-- 100800: base hunt finding (anchor for chained severity rules) -->
+  <rule id="100800" level="3">
+    <if_sid>100500</if_sid>
+    <field name="job_type">^hunt_finding$</field>
+    <description>Hunt finding: $(hunt.hypothesis_id) - $(hunt.summary)</description>
+    <group>hunting,</group>
+    <mitre>
+      <id>$(hunt.attack_technique)</id>
+    </mitre>
+  </rule>
+
+  <!-- 100801: low confidence (level 5) -->
+  <rule id="100801" level="5">
+    <if_sid>100800</if_sid>
+    <field name="hunt.confidence">^low$</field>
+    <description>Hunt finding (low conf): $(hunt.summary)</description>
+    <group>hunting,</group>
+  </rule>
+
+  <!-- 100802: medium confidence (level 8) -->
+  <rule id="100802" level="8">
+    <if_sid>100800</if_sid>
+    <field name="hunt.confidence">^medium$</field>
+    <description>Hunt finding (medium conf): $(hunt.summary)</description>
+    <group>hunting,</group>
+  </rule>
+
+  <!-- 100803: high confidence (level 12) -->
+  <rule id="100803" level="12">
+    <if_sid>100800</if_sid>
+    <field name="hunt.confidence">^high$</field>
+    <description>Hunt finding (high conf): $(hunt.summary)</description>
+    <group>hunting,</group>
+  </rule>
+
+  <!--
+    100810-100819: reserved for actor-attributed high-confidence findings
+                   (e.g. "Volt Typhoon TTP observed").
+    100820-100899: reserved for future expansion.
+  -->
+
+</group>

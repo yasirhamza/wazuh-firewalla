@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from src.limits import RateLimitExceeded, RateLimiter
+from src.logging_setup import HeartbeatWriter
 from src.time_range import TimeRangeError
 from src.wazuh_client import WazuhClientError
 from src.wazuh_service import AlertNotFound, WazuhDataService
@@ -124,7 +125,11 @@ def _wrap_call(tool_name: str, rate_limiter: RateLimiter, fn) -> Any:
 
 # ---------- App factory ----------
 
-def build_app(service: WazuhDataService, rate_limiter: RateLimiter) -> FastMCP:
+def build_app(
+    service: WazuhDataService,
+    rate_limiter: RateLimiter,
+    hunt_writer: HeartbeatWriter | None = None,
+) -> FastMCP:
     app = FastMCP("wazuh-mcp")
 
     # --- search_alerts ---
@@ -298,5 +303,29 @@ def build_app(service: WazuhDataService, rate_limiter: RateLimiter) -> FastMCP:
                               baseline_days=baseline_days,
                               top_n=top_n,
                           ))
+
+    # --- submit_hunt_finding ---
+    @app.tool(
+        name="submit_hunt_finding",
+        description=(
+            "Submit a confirmed hunt finding for ingestion as a Wazuh alert. "
+            "Required when the analyst confirms a finding during the Finalize "
+            "phase of a /hunt session. The finding lands in wazuh-alerts-* via "
+            "rule 100800-100803 (severity by confidence). DO NOT call without "
+            "explicit analyst confirmation — this writes to the SIEM."
+        ),
+    )
+    def submit_hunt_finding(finding: dict[str, Any]) -> dict[str, str]:
+        """Validate and append a hunt finding to the sidecar-status JSONL stream.
+
+        Schema: docs/specs/2026-04-25-cti-driven-hunting-design.md §4.3.
+        """
+        if hunt_writer is None:
+            raise RuntimeError(
+                "submit_hunt_finding called but hunt_writer is not configured. "
+                "main.py must pass hunt_writer=... into build_app()."
+            )
+        hunt_writer.record_hunt_finding(finding)
+        return {"status": "submitted", "finding_id": finding.get("finding_id", "")}
 
     return app

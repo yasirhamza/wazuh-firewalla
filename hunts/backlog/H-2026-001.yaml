@@ -1,0 +1,57 @@
+id: H-2026-001
+title: "Beaconing to low-reputation infrastructure from Windows endpoints"
+created: 2026-04-25
+updated: 2026-04-25
+owner: yasirhamza
+status: completed
+runs:
+  - hunts/runs/H-2026-001-20260425T1305Z.md
+priority: medium
+
+threat_actor: null
+attack:
+  techniques: ["T1071.001", "T1571"]
+  tactics: ["command-and-control"]
+
+cti_sources:
+  - type: mitre
+    ref: "T1071.001"
+    url: "https://attack.mitre.org/techniques/T1071/001/"
+  - type: cisa
+    ref: "AA24-038A"
+    url: "https://www.cisa.gov/news-events/cybersecurity-advisories/aa24-038a"
+    date: 2024-02-07
+
+abstract: >
+  Adversary establishes C2 over HTTP(S) to attacker-controlled infrastructure.
+  Beaconing pattern is regular intervals with consistent payload size.
+
+hypothesis: >
+  If a Windows endpoint is beaconing to attacker C2 over HTTP(S), we should
+  observe Firewalla flows from that endpoint to a small set of destinations
+  with regular timing (jitter <30%) and no corresponding user-initiated
+  browsing activity in the same window.
+
+data_sources:
+  - "wazuh-alerts-* (data.source: firewalla-msp, event_type: flow)"
+  - "wazuh-alerts-* (data.source: windows-srp)"
+
+scope:
+  time_range: "last_7d"
+  agents: "all_windows"
+  exclude: ["known_corporate_proxies"]
+
+success_criteria: >
+  Confirm: >=1 Windows endpoint with >=10 outbound flows to a single non-CDN
+  destination over >=3 hours, jitter <30%, no concurrent user browsing.
+  Refute: no such pattern, or pattern fully explained by known software
+  (Windows Update, OneDrive sync, etc.).
+
+investigation_steps:
+  - "Aggregate Firewalla flows by (agent.name, data.dstip) over scope"
+  - "Filter to destinations with >=10 flows, <=3 unique src ports"
+  - "Compute inter-flow timing variance per (agent, dst) pair"
+  - "For top candidates, pivot to threat_intel_matches and entity_activity"
+  - "Cross-check with Windows SRP for concurrent user activity"
+
+tags: [c2, beaconing, network, windows]

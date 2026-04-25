@@ -51,11 +51,22 @@ def main() -> None:
     heartbeat.emit_once()  # seed the stream on startup
     heartbeat.start()
 
+    # Separate writer with sidecar=hunt-runner for submit_hunt_finding events.
+    # Shares the same JSONL stream but does NOT start a heartbeat thread —
+    # this writer only exists to label hunt-finding events distinctly from
+    # the wazuh-mcp tool-call traffic.
+    hunt_writer = HeartbeatWriter(
+        sidecar="hunt-runner",
+        path=STATUS_FILE,
+        max_size=settings.max_log_size,
+        max_backups=settings.max_log_backups,
+    )
+
     rate_limiter = RateLimiter(
         per_min=settings.rate_limit_per_min, burst=settings.rate_limit_burst
     )
 
-    mcp_app = build_app(service=service, rate_limiter=rate_limiter)
+    mcp_app = build_app(service=service, rate_limiter=rate_limiter, hunt_writer=hunt_writer)
 
     if args.transport == "stdio":
         logger.info("starting stdio transport")

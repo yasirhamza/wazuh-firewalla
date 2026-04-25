@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-04-25T13:05:00Z",
+  "event_type": "threat_intel_match",
+  "source": "threat-intel",
+  "list": "urlhaus",
+  "ioc": "185.199.108.133",
+  "data": {
+    "srcip": "10.0.0.5",
+    "dstip": "185.199.108.133",
+    "rule_id": "100452"
+  }
+}

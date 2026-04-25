@@ -1,0 +1,54 @@
+id: H-2026-002
+title: "DNS-based exfiltration via abnormally long subdomain queries"
+created: 2026-04-25
+updated: 2026-04-25
+owner: yasirhamza
+status: proposed
+priority: medium
+
+threat_actor: null
+attack:
+  techniques: ["T1048.003", "T1071.004"]
+  tactics: ["exfiltration", "command-and-control"]
+
+cti_sources:
+  - type: mitre
+    ref: "T1048.003"
+    url: "https://attack.mitre.org/techniques/T1048/003/"
+  - type: mitre
+    ref: "T1071.004"
+    url: "https://attack.mitre.org/techniques/T1071/004/"
+
+abstract: >
+  DNS exfiltration encodes data in long subdomain labels of TXT/A queries to
+  attacker-controlled domains. Indicators: queries with subdomains >50 chars,
+  high entropy, and a small set of repeated authoritative servers.
+
+hypothesis: >
+  If a host is exfiltrating data over DNS, we should see a sequence of
+  Firewalla DNS queries to a single second-level domain with subdomain
+  components >50 characters and high label entropy, occurring at a steady
+  rate over minutes/hours.
+
+data_sources:
+  - "wazuh-alerts-* (data.source: firewalla-msp, event_type: alarm, _type: ALARM_DNS)"
+  - "wazuh-alerts-* (rule.id: 100720)  # first-seen domains"
+
+scope:
+  time_range: "last_7d"
+  agents: "all"
+  exclude: ["known_corporate_dns_resolvers"]
+
+success_criteria: >
+  Confirm: >=1 host with >=50 DNS queries to a single 2LD where >=10 of the
+  queries have subdomain length >50 chars, in a contiguous 60-min window.
+  Refute: no such pattern, or pattern explained by software (e.g. ESET LiveGrid,
+  AV cloud-lookup services).
+
+investigation_steps:
+  - "Aggregate Firewalla DNS-related alarms by (agent.name, second-level domain) over scope"
+  - "For top candidates, fetch sample queries and compute subdomain length distribution"
+  - "Cross-check second-level domain against threat-intel CDB lists"
+  - "Verify whether queries are explained by known software (consult vendor-bookmarks.md)"
+
+tags: [dns, exfiltration, network]

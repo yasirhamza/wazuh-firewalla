@@ -1,0 +1,32 @@
+<!--
+  Drafted by hunt H-2026-001 @ 2026-04-25T13:05Z.
+  Lowers severity of URLhaus-IP matches (rule 100452) when the destination IP
+  is a well-known shared-CDN address. Targets the false-positive class
+  observed during the hunt: URLhaus tracks malicious URLs, and many of those
+  URLs live on GitHub Pages / Fastly / Cloudflare / Azure CDN — every legit
+  connection to those CDNs trips a "C2 match" otherwise.
+
+  PROMOTION: requires a CDB list at /var/ossec/etc/lists/threat-intel/shared-cdn-ips
+  populated with known shared-infrastructure IPs/CIDRs. The list must be
+  declared under <ruleset> in wazuh_manager.conf or analysisd will not
+  compile it (see CLAUDE.md note on CDB-list declaration).
+
+  Source data for the suppression list (initial seed):
+    - 185.199.108.0/22         GitHub Pages
+    - 151.101.0.0/16           Fastly
+    - 104.16.0.0/13            Cloudflare
+    - 23.32.0.0/11             Akamai
+    - 13.107.0.0/16            Microsoft global anycast
+    - 20.0.0.0/11              Microsoft Azure (broad — narrow if FPs persist)
+-->
+<group name="threat_intel,urlhaus,suppression,">
+
+  <!-- 100454: URLhaus IP match against well-known shared CDN -> suppress -->
+  <rule id="100454" level="0">
+    <if_sid>100452</if_sid>
+    <list field="data.dstip" lookup="address_match_key">etc/lists/threat-intel/shared-cdn-ips</list>
+    <description>URLhaus IP match against shared CDN ($(data.dstip)) — suppressed.</description>
+    <group>threat_intel,urlhaus,</group>
+  </rule>
+
+</group>
