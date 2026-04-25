@@ -170,7 +170,7 @@
   </rule>
 
   <!-- Uncategorized External Connection -->
-  <rule id="100421" level="5">
+  <rule id="100421" level="3">
     <if_sid>100400</if_sid>
     <field name="flow.category">^$</field>
     <field name="flow.blocked">false</field>
